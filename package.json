@@ -1,0 +1,32 @@
+{
+  "name": "home-assistant-voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/cli/cli.ts start",
+    "stop": "tsx src/cli/cli.ts stop",
+    "status": "tsx src/cli/cli.ts status",
+    "logs": "tsx src/cli/cli.ts logs",
+    "ask": "tsx src/cli/cli.ts ask",
+    "agent:ask": "tsx src/cli/cli.ts ask",
+    "kws:download-model": "mkdir -p models && cd models && if [ ! -d sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01 ]; then curl -L -o sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 && tar -xjf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 && rm sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2; fi",
+    "kws:test": "node demos/kws-file-demo.js",
+    "kws:test:xiaoyu": "node demos/kws-file-demo.js --keywords models/kws/keywords-xiaoyu.txt"
+  },
+  "dependencies": {
+    "@openai/agents": "^0.11.4",
+    "dotenv": "^17.4.2",
+    "node-microphone": "^0.2.0",
+    "sherpa-onnx-node": "^1.13.2",
+    "tencentcloud-sdk-nodejs-tts": "^4.1.203",
+    "ws": "^8.20.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  }
+}

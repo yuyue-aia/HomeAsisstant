@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小余小余唤醒词测试</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; line-height: 1.6; }
+    button { font-size: 16px; padding: 10px 18px; margin-right: 8px; }
+    .status { padding: 12px; border-radius: 8px; background: #f3f4f6; margin: 16px 0; }
+    .wake { color: #0f766e; font-weight: 700; }
+    pre { background: #111827; color: #e5e7eb; padding: 16px; border-radius: 8px; min-height: 180px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>小余小余唤醒词测试</h1>
+  <p>点击开始后，浏览器会请求麦克风权限。对着电脑说“小余小余”，检测结果会显示在下方。</p>
+  <button id="start">开始监听</button>
+  <button id="stop" disabled>停止</button>
+  <div class="status" id="status">未开始</div>
+  <pre id="log"></pre>
+
+  <script>
+    const TARGET_SAMPLE_RATE = 16000;
+    let audioContext;
+    let mediaStream;
+    let source;
+    let processor;
+    let ws;
+
+    const startButton = document.getElementById('start');
+    const stopButton = document.getElementById('stop');
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+
+    function log(message, className) {
+      const time = new Date().toLocaleTimeString();
+      const line = document.createElement('div');
+      line.textContent = `[${time}] ${message}`;
+      if (className) line.className = className;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    function downsampleToInt16(input, inputSampleRate) {
+      if (inputSampleRate === TARGET_SAMPLE_RATE) {
+        return floatToInt16(input);
+      }
+
+      const ratio = inputSampleRate / TARGET_SAMPLE_RATE;
+      const outputLength = Math.floor(input.length / ratio);
+      const output = new Float32Array(outputLength);
+
+      for (let i = 0; i < outputLength; i += 1) {
+        const start = Math.floor(i * ratio);
+        const end = Math.min(Math.floor((i + 1) * ratio), input.length);
+        let sum = 0;
+        for (let j = start; j < end; j += 1) sum += input[j];
+        output[i] = sum / Math.max(1, end - start);
+      }
+
+      return floatToInt16(output);
+    }
+
+    function floatToInt16(input) {
+      const output = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i += 1) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return output;
+    }
+
+    async function start() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = async () => {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: true,
+          },
+        });
+
+        audioContext = new AudioContext();
+        source = audioContext.createMediaStreamSource(mediaStream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (event) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm = downsampleToInt16(input, audioContext.sampleRate);
+          ws.send(pcm.buffer);
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        startButton.disabled = true;
+        stopButton.disabled = false;
+        setStatus(`监听中：输入采样率 ${audioContext.sampleRate}Hz，发送 ${TARGET_SAMPLE_RATE}Hz PCM`);
+        log('开始监听，请说“小余小余”');
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'wake') {
+          log(`检测到唤醒词：${data.keyword}`, 'wake');
+        } else if (data.type === 'ready') {
+          log(data.message);
+        } else if (data.type === 'error') {
+          log(`错误：${data.message}`);
+        }
+      };
+
+      ws.onerror = () => log('WebSocket 连接失败');
+      ws.onclose = () => setStatus('连接已关闭');
+    }
+
+    async function stop() {
+      if (processor) processor.disconnect();
+      if (source) source.disconnect();
+      if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
+      if (audioContext) await audioContext.close();
+      if (ws) ws.close();
+
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      setStatus('已停止');
+      log('停止监听');
+    }
+
+    startButton.onclick = () => start().catch((error) => log(error.message));
+    stopButton.onclick = () => stop().catch((error) => log(error.message));
+  </script>
+</body>
+</html>
