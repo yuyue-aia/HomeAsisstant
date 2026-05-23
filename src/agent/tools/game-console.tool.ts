@@ -62,7 +62,7 @@ export const controlGameConsoleTool = tool<
 >({
   name: 'control_game_console',
   description:
-    '控制小朋友的 Switch 游戏机：申请启动（按配额通电并定时断电）、提前停止、查询今日剩余时间和当前是否有人在玩。仅周末可玩，每人每天 2 小时上限。',
+    '控制小朋友的 Switch 游戏机：申请启动（按配额通电并定时断电）、提前停止、查询今日剩余时间和当前是否有人在玩。每人每天 1 小时上限，单次最少 5 分钟。',
   parameters: controlGameConsoleParameters,
   async execute({ action, child, minutes }) {
     const ctrl = getGameConsoleController();
