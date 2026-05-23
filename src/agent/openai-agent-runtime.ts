@@ -65,7 +65,7 @@ export class OpenAIAgentRuntime {
     );
     this.historyMaxItems = Math.max(
       0,
-      Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 200,
+      Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 40,
     );
     this.history = this.loadHistoryFromDisk();
 
@@ -267,11 +267,18 @@ export class OpenAIAgentRuntime {
       if (!raw.trim()) return [];
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
+      // 启动时也按 historyMaxItems 截断，避免历史文件意外膨胀导致首轮上下文爆掉。
+      const truncated =
+        this.historyMaxItems > 0 && parsed.length > this.historyMaxItems
+          ? parsed.slice(parsed.length - this.historyMaxItems)
+          : parsed;
       logger.info('agent.history.loaded', {
         file: this.historyFile,
-        items: parsed.length,
+        items: truncated.length,
+        rawItems: parsed.length,
+        truncated: truncated.length !== parsed.length,
       });
-      return parsed as AgentInputItem[];
+      return truncated as AgentInputItem[];
     } catch (error) {
       logger.warn('agent.history.load_failed', {
         file: this.historyFile,
