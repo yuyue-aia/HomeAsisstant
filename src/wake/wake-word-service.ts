@@ -65,6 +65,7 @@ export class WakeWordService extends EventEmitter {
     const kwsConfig = this.buildSherpaConfig(!!options.debug);
     this.kws = new sherpaOnnx.KeywordSpotter(kwsConfig);
     this.stream = this.kws.createStream();
+    this.primeStream();
 
     const diagEnv = (process.env.WAKE_DIAG ?? '').toLowerCase();
     this.diagnose = options.diagnose ?? (diagEnv === '1' || diagEnv === 'true');
@@ -117,6 +118,7 @@ export class WakeWordService extends EventEmitter {
         if (this.diagnose) this.dumpRollingWav('detected');
         this.emit('wake', event);
         this.stream = this.kws.createStream();
+        this.primeStream();
         return;
       }
     }
@@ -125,7 +127,38 @@ export class WakeWordService extends EventEmitter {
   /** 重置流，例如外部状态机切换状态时 */
   reset(): void {
     this.stream = this.kws.createStream();
+    this.primeStream();
     this.lastWakeAt = 0;
+  }
+
+  /**
+   * 给新建的流喂一段低幅噪声做暖机：
+   * 流式 zipformer KWS 是因果模型，需要积累上下文才能稳定打分。
+   * 进程刚起来 / 唤醒后重建流时，上下文是空的，第一次喊唤醒词容易因为
+   * 缓冲不够而漏检（远场更明显）。这里在创建流后立即喂 1.2s 极低幅高斯噪声
+   * （-60dBFS 量级），让 zipformer 内部 cache 充满，避免"第一次唤不醒"。
+   * 噪声而非纯静音，是为了避免某些特征前端对零向量做特殊处理。
+   */
+  private primeStream(): void {
+    const durationSec = 1.2;
+    const n = Math.floor(SAMPLE_RATE * durationSec);
+    const samples = new Float32Array(n);
+    // 简单的 LCG 伪随机，足够；幅度约 0.001 ≈ -60 dBFS
+    let s = 0x12345678;
+    for (let i = 0; i < n; i++) {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      samples[i] = ((s & 0xffff) / 0xffff - 0.5) * 0.002;
+    }
+    try {
+      this.stream.acceptWaveform({ sampleRate: SAMPLE_RATE, samples });
+      // 把 prime 期间产生的"伪命中"全部消费掉（理论上不会有，但稳妥起见）
+      while (this.kws.isReady(this.stream)) {
+        this.kws.decode(this.stream);
+        this.kws.getResult(this.stream);
+      }
+    } catch (err) {
+      logger.warn('wake.prime_failed', { error: (err as Error).message });
+    }
   }
 
   /**
