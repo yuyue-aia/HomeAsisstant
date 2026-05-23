@@ -33,6 +33,7 @@ const DEFAULT_INSTRUCTIONS = `
   · 听到"想玩游戏/打开游戏机"先 action="status"；
   · 启动需要 child 与 minutes，缺哪个问哪个；主动停止用 action="stop_game"；
   · 工具返回的 message 已是面向小朋友的措辞，可直接播报，不要编造剩余时间；
+  · 不论是谁，只能使用余跃/余晓的游戏时间，才能开启游戏机；
   · 工具返回 not_weekend / no_quota / session_in_progress 时，温和说明原因，不责备。
 `.trim();
 
