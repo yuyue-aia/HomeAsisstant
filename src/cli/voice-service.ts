@@ -1,6 +1,7 @@
 import { loadConfig, requireOpenAIConfig, requireTencentConfig } from '../config/env';
 import { logger } from '../common/logger';
 import { DialogSession, type TtsAudioEvent } from '../dialog/dialog-session';
+import { getMusicService } from '../services/music/music-service';
 import { readKeywordDisplays } from '../wake/wake-word-service';
 import { Microphone, playAudioBuffer } from './audio-io';
 
@@ -148,6 +149,18 @@ export class VoiceService {
     this.stopped = true;
     this.mic.stop();
     this.session.dispose();
+    // 进程退出时把音乐也停掉——ncm-cli 起的是常驻 mpv daemon，不主动 stop 进程退出后还会继续放。
+    // 用 race 限时 1.5s，宁可放弃也不能阻塞 SIGINT/SIGTERM 退出路径。
+    await Promise.race([
+      getMusicService()
+        .stop()
+        .catch((error) => {
+          logger.warn('voice.shutdown.music_stop_failed', {
+            error: (error as Error).message,
+          });
+        }),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+    ]);
     // 等当前正在播放的最后一段播完，避免截断
     await this.playChain.catch(() => undefined);
     // flush 上报 trace（如果开启了 Langfuse）

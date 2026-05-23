@@ -8,6 +8,8 @@ import { TencentTtsClient, splitForTts, StreamingSentenceSplitter } from '../tts
 import { OpenAIAgentRuntime } from '../agent/openai-agent-runtime';
 import { getGameConsoleController } from '../services/game-console-controller';
 import { getReminderService } from '../services/reminder-service';
+import { getMusicService } from '../services/music/music-service';
+import { DuckController } from '../services/music/duck-controller';
 
 export type DialogState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'followup_wait';
 
@@ -125,6 +127,23 @@ export class DialogSession extends EventEmitter {
         });
     } catch (error) {
       logger.warn('dialog.reminder.bind_failed', {
+        error: (error as Error).message,
+      });
+    }
+
+    // 音乐服务：触发 init（探测 ncm-cli 登录态、设默认音量），并挂上 duck 控制器，
+    // 让对话状态变更自动 pause/resume 音乐（mac mini 无 AEC 必须 pause）。
+    try {
+      void getMusicService()
+        .init()
+        .catch((error) => {
+          logger.warn('dialog.music.init_failed', {
+            error: (error as Error).message,
+          });
+        });
+      new DuckController().attach(this);
+    } catch (error) {
+      logger.warn('dialog.music.bind_failed', {
         error: (error as Error).message,
       });
     }

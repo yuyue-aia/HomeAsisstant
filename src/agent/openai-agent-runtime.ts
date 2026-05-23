@@ -20,6 +20,7 @@ import { getCurrentTimeTool } from './tools/get-current-time.tool';
 import { webSearchTool } from './tools/web-search.tool';
 import { readFileTool, writeFileTool } from './tools/file-system.tool';
 import { manageReminderTool } from './tools/reminder.tool';
+import { searchMusicTool, controlMusicPlayerTool } from './tools/music.tool';
 import { createLoadSkillTool } from './tools/load-skill.tool';
 import { discoverSkills, buildSkillsPromptSection } from './skills/skill-loader';
 import {
@@ -125,6 +126,8 @@ export class OpenAIAgentRuntime {
         controlAirConditionerTool,
         controlGameConsoleTool,
         manageReminderTool,
+        searchMusicTool,
+        controlMusicPlayerTool,
         getCurrentTimeTool,
         webSearchTool,
         readFileTool,

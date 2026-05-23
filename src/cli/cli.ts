@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -49,13 +49,37 @@ async function cmdStartForeground(): Promise<void> {
   const service = new VoiceService();
   service.start();
 
-  const shutdown = async (signal: string) => {
+  let shuttingDown = false;
+  const shutdown = async (signal: string, exitCode = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`\n收到 ${signal}，正在退出…`);
-    await service.stop();
-    process.exit(0);
+    try {
+      await service.stop();
+    } catch (error) {
+      console.error('退出时清理失败：', (error as Error).message);
+    }
+    // 双保险：service.stop 内部已 await 过音乐 stop（带 1.5s 超时），
+    // 这里再同步发一次 `ncm-cli stop`，确保 mpv daemon 一定收到。
+    forceStopMusicSync();
+    process.exit(exitCode);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGHUP', () => void shutdown('SIGHUP'));
+  // 任何"漏网"的崩溃路径也要把音乐停掉
+  process.on('uncaughtException', (error) => {
+    console.error('uncaughtException:', error);
+    void shutdown('uncaughtException', 1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('unhandledRejection:', reason);
+    void shutdown('unhandledRejection', 1);
+  });
+  // process.exit() 直接退出（无法 await 异步 stop）的最后兜底——同步 spawn `ncm-cli stop`
+  process.on('exit', () => {
+    forceStopMusicSync();
+  });
   // 诊断：kill -USR2 <pid> 触发把最近 N 秒麦克风录音存成 wav。
   // 仅当 WAKE_DIAG=1 时有效。
   process.on('SIGUSR2', () => {
@@ -63,6 +87,27 @@ async function cmdStartForeground(): Promise<void> {
     if (file) console.log(`[wake-diag] dumped: ${file}`);
     else console.log('[wake-diag] 未启用，请用 WAKE_DIAG=1 启动服务');
   });
+}
+
+/**
+ * 同步关掉音乐播放——用在 process.on('exit') 等只能跑同步代码的钩子里。
+ * 失败/没有 ncm-cli 时静默忽略；最长阻塞 1s。
+ *
+ * 幂等：内部用全局 flag，多次调用只生效一次（避免 SIGINT 已停了又被 'exit' 重发）。
+ */
+let musicForceStopped = false;
+function forceStopMusicSync(): void {
+  if (musicForceStopped) return;
+  musicForceStopped = true;
+  try {
+    spawnSync('ncm-cli', ['stop'], {
+      stdio: 'ignore',
+      timeout: 1000,
+      windowsHide: true,
+    });
+  } catch {
+    /* ignore：没装 ncm-cli 或调用失败都不影响进程退出 */
+  }
 }
 
 function cmdStartDaemon(): void {
