@@ -7,6 +7,7 @@ import { TencentAsrClient, type AsrResult } from '../asr/tencent-asr-client';
 import { TencentTtsClient, splitForTts, StreamingSentenceSplitter } from '../tts/tencent-tts-client';
 import { OpenAIAgentRuntime } from '../agent/openai-agent-runtime';
 import { getGameConsoleController } from '../services/game-console-controller';
+import { getReminderService } from '../services/reminder-service';
 
 export type DialogState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'followup_wait';
 
@@ -108,6 +109,22 @@ export class DialogSession extends EventEmitter {
         });
     } catch (error) {
       logger.warn('dialog.game_console.bind_failed', {
+        error: (error as Error).message,
+      });
+    }
+
+    // 提醒服务：与 game-console 同构地接入主动播报 + 启动恢复。
+    try {
+      getReminderService().setAnnouncer((text) => this.announce(text));
+      void getReminderService()
+        .recover()
+        .catch((error) => {
+          logger.warn('dialog.reminder.recover_failed', {
+            error: (error as Error).message,
+          });
+        });
+    } catch (error) {
+      logger.warn('dialog.reminder.bind_failed', {
         error: (error as Error).message,
       });
     }

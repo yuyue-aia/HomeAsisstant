@@ -19,6 +19,7 @@ import { controlGameConsoleTool } from './tools/game-console.tool';
 import { getCurrentTimeTool } from './tools/get-current-time.tool';
 import { webSearchTool } from './tools/web-search.tool';
 import { readFileTool, writeFileTool } from './tools/file-system.tool';
+import { manageReminderTool } from './tools/reminder.tool';
 import {
   createLangfuseTracerFromEnv,
   type LangfuseTracingProcessor,
@@ -53,6 +54,35 @@ const DEFAULT_INSTRUCTIONS = `
 - 升温/降温没说具体度数时，delta 默认按2度。
 - 用户只说"有点热/有点冷"不算控制指令，先问"要帮您开空调吗"，不要自己开。
 - 批量操作（如关所有空调）先用一句话确认，再按房间逐个调用。
+
+【提醒】
+- 用户说"提醒我...""到点喊我..."→ 调 manage_reminder action=create。
+- 时间解析由你来做：先调 get_current_time 取当前本机时间，再把"明天下午4点""10 分钟后""下周一上午 9 点"
+  换算成本机时区的 ISO 8601 字符串（带 +08:00 偏移），作为 fire_at_iso 传入。
+- 提前量由你判断（这是用户体验的关键）：
+  · 需要准备/出门/接送/会议/上课/坐车/赴约这类事件 → 自动提前 15 分钟，
+    text 写成"再过十五分钟…"或"还有十五分钟…"，让用户听到时知道还有缓冲。
+    例："明天下午 4 点送余跃去打球"→ fire_at_iso=15:45，text="再过十五分钟送余跃去打球"。
+  · 吃药/喝水/起床/睡觉/打卡/烧水好了/饭好了/番茄钟到时间 这类按点即触发的 →
+    不要提前，fire_at_iso 就是用户说的时间，text 就是事件本身。
+  · 用户明确说了提前量（"提前半小时叫我""提前 5 分钟""到点叫我"）→ 严格按用户说的来，不要自作主张。
+  · 拿不准就按"按点触发"处理，不要乱加提前量。
+- 没说重复，默认 once；用户说"每天/每日"→ recurrence=daily。
+- 用户说"我有什么提醒""今天还有什么事"→ action=list。
+- 用户说"取消那个打球的提醒"→ action=cancel，把"打球"作为 query 传入。
+- 工具返回的 message 只是给你的语义提示（如"已创建提醒"），不要原样念。
+  你要根据 reminder/items/matches 里的 nextFireAtIso + recurrence + text，
+  结合当前时间，自己组织成自然中文播报：
+  · 创建确认时按用户说的原始事件时间播报（不是 fire_at_iso）：
+    例如用户说"明天下午 4 点送余跃去打球"，确认应念"好的，明天下午四点提醒你送余跃去打球"，
+    不要说"三点四十五"。
+  · once，今天/明天/后天 → 用相对词。
+  · once，更远 → 用月日："好的，五月三十号上午九点提醒你开会。"
+  · daily → 用"每天"+ 时间。
+  · list 多条按 nextFireAtIso 升序念，最多 3 条，多了说"还有 X 条"；念的时候参考 text，
+    text 已经包含了"再过十五分钟…"这种自然措辞，直接用即可。
+  · cancel ambiguous → 把每条用同样的自然中文念出来，反问"你要取消哪一个"。
+- 时间表达要口语：分钟为 0 省略；30 分可念"半"；用上午/中午/下午/晚上而不是 24 小时制。
 `.trim();
 
 export class OpenAIAgentRuntime {
@@ -129,6 +159,7 @@ export class OpenAIAgentRuntime {
         controlGosundPlugTool,
         controlAirConditionerTool,
         controlGameConsoleTool,
+        manageReminderTool,
         getCurrentTimeTool,
         webSearchTool,
         readFileTool,
