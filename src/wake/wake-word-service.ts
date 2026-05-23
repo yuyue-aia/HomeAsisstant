@@ -84,6 +84,17 @@ export class WakeWordService extends EventEmitter {
     this.lastWakeAt = 0;
   }
 
+  /** 读取当前 keywords 文件中所有显示名（@xxx），用于提示语 */
+  getDisplayKeywords(): string[] {
+    return readKeywordDisplays(path.resolve(this.config.kwsKeywordsFile));
+  }
+
+  /** 主唤醒词的显示名（取第一条），找不到时回退到给定值 */
+  getPrimaryDisplay(fallback = '唤醒词'): string {
+    const list = this.getDisplayKeywords();
+    return list[0] || fallback;
+  }
+
   private buildSherpaConfig(debug: boolean) {
     const modelDir = path.resolve(this.config.kwsModelDir);
     const config = {
@@ -127,4 +138,31 @@ export function pcm16ToFloat32(buffer: Buffer): Float32Array {
     samples[i] = buffer.readInt16LE(i * 2) / 32768;
   }
   return samples;
+}
+
+/**
+ * 解析 sherpa-onnx KWS keywords 文件中的显示名（@xxx）。
+ *
+ * 格式示例（每行一个 keyword）：
+ *   c ài b āo c ài b āo :2.0 #0.45 @菜包菜包
+ *
+ * - 以 `@` 后的内容为展示名；
+ * - 若没有 `@`，回退用整行（去掉 :boost / #threshold）作为名称。
+ */
+export function readKeywordDisplays(filePath: string): string[] {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'))
+      .map((line) => {
+        const at = line.lastIndexOf('@');
+        if (at >= 0) return line.slice(at + 1).trim();
+        return line.replace(/\s*[:#].*$/, '').trim();
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }

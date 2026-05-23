@@ -203,7 +203,7 @@ function printHelp(): void {
       '',
       'Tips:',
       '  • 若提示找不到录音工具，请：brew install sox（macOS）或 apt install sox（debian）',
-      '  • 默认唤醒词：小余小余（可改 KWS_KEYWORDS_FILE）',
+      '  • 默认唤醒词：菜包菜包（可改 KWS_KEYWORDS_FILE）',
     ].join('\n'),
   );
 }

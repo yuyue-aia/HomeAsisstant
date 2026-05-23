@@ -5,7 +5,7 @@ const { WebSocketServer } = require('ws');
 const sherpaOnnx = require('sherpa-onnx-node');
 
 const MODEL_DIR = 'models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01';
-const DEFAULT_KEYWORDS = 'models/kws/keywords-xiaoyu.txt';
+const DEFAULT_KEYWORDS = 'models/kws/keywords-caibao.txt';
 const DEFAULT_PORT = 3010;
 const SAMPLE_RATE = 16000;
 const COOLDOWN_MS = 1500;
@@ -140,7 +140,7 @@ function main() {
     let stream = kws.createStream();
     let lastWakeAt = 0;
 
-    ws.send(JSON.stringify({ type: 'ready', message: 'KWS 服务已连接，请说“小余小余”' }));
+    ws.send(JSON.stringify({ type: 'ready', message: 'KWS 服务已连接，请说"菜包菜包"' }));
 
     ws.on('message', (data, isBinary) => {
       if (!isBinary) return;

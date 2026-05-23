@@ -18,7 +18,7 @@
 
 | 能力 | 方案 | 结论 |
 | --- | --- | --- |
-| 唤醒词 | `sherpa-onnx KWS` + 本地 `keywords` 文件 | 已选定并通过 Demo 验证；默认唤醒词为“小余小余”，本地检测，不持续上传环境音 |
+| 唤醒词 | `sherpa-onnx KWS` + 本地 `keywords` 文件 | 已选定并通过 Demo 验证；默认唤醒词为“菜包菜包”，本地检测，不持续上传环境音 |
 | 实时语音识别 | 腾讯云 ASR 实时语音识别 WebSocket | 适合对话场景，可边说边出字；需自行处理 WebSocket 签名和音频分片 |
 | 短语音识别 | 腾讯云 ASR `SentenceRecognition` | 适合 60 秒内短音频，Node.js 官方通用 SDK 可直接调用，可作为降级方案 |
 | 语音输出 | 腾讯云 TTS `TextToVoice` | Node.js 可通过 `tencentcloud-sdk-nodejs-tts` 调用，返回 Base64 音频 |
@@ -281,8 +281,8 @@ idle
 
 - 基于 `sherpa-onnx-node`；
 - 不直接采集麦克风，而是接收外部传入的 `16kHz/16bit/mono PCM`；
-- 默认唤醒词为“小余小余”；
-- 默认加载 `models/kws/keywords-xiaoyu.txt`；
+- 默认唤醒词为“菜包菜包”；
+- 默认加载 `models/kws/keywords-caibao.txt`；
 - 默认模型目录为 `models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01`；
 - 命中唤醒词后向 `DialogSession` 发出 `wake` 事件；
 - 通过 `keywords` 文件配置 boosting score 和 trigger threshold；
@@ -520,7 +520,7 @@ src/
 | `@openai/agents` | OpenAI Agents SDK，负责 Agent、Tools、运行循环和上下文 |
 | `dotenv` | 本地环境变量加载 |
 | `node-microphone` | 本机麦克风录音 |
-| `sherpa-onnx-node` | 本地中文唤醒词检测，默认监听“小余小余” |
+| `sherpa-onnx-node` | 本地中文唤醒词检测，默认监听“菜包菜包” |
 | `tencentcloud-sdk-nodejs-tts` | 腾讯云 TTS 调用 |
 | `ws` | 腾讯云 ASR WebSocket 客户端，以及 KWS Demo WebSocket 服务 |
 | `zod` | Agent tool 参数校验 |

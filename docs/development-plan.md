@@ -8,7 +8,7 @@
 本机麦克风
   → VoiceService
   → DialogSession
-  → WakeWordService（sherpa-onnx KWS，小余小余）
+  → WakeWordService（sherpa-onnx KWS，菜包菜包）
   → TencentAsrClient（腾讯云实时 ASR WebSocket）
   → OpenAIAgentRuntime（OpenAI Agents SDK）
   → TencentTtsClient（腾讯云 TTS）
@@ -22,7 +22,7 @@
 - TypeScript 工程骨架与统一配置（`src/config/env.ts`）
 - CLI 入口：`start`、`stop`、`status`、`logs`、`ask`
 - 本机音频：`node-microphone` 采集 + 系统播放器播放
-- 唤醒：`WakeWordService` 封装 sherpa-onnx KWS（默认词「小余小余」）
+- 唤醒：`WakeWordService` 封装 sherpa-onnx KWS（默认词「菜包菜包」）
 - 语音识别：`TencentAsrClient` 实时 WebSocket（含 HMAC-SHA1 签名）
 - Agent：`OpenAIAgentRuntime` + 工具 `control_device`、`get_current_time`
 - 语音合成：`TencentTtsClient`（基础 + 长文本拆句）
@@ -58,7 +58,7 @@ npm run ask -- "现在几点"
 ## 离线/半离线测试入口
 
 - 唤醒词文件测试：`npm run kws:test`
-- 自定义“小余小余”文件测试：`npm run kws:test:xiaoyu`
+- 自定义“菜包菜包”文件测试：`npm run kws:test:caibao`
 - 麦克风 KWS Demo：当前没有 npm script，可直接运行 `node demos/kws-mic-server.js`，再打开 `http://localhost:3010/kws-mic.html`
 - Agent 文本：`npm run agent:ask -- "你好"`（需要 `OPENAI_API_KEY`）
 

@@ -58,7 +58,7 @@ export function loadConfig(): AppConfig {
       'KWS_MODEL_DIR',
       'models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01',
     ),
-    kwsKeywordsFile: strEnv('KWS_KEYWORDS_FILE', 'models/kws/keywords-xiaoyu.txt'),
+    kwsKeywordsFile: strEnv('KWS_KEYWORDS_FILE', 'models/kws/keywords-caibao.txt'),
 
     homeAssistantBaseUrl: process.env.HOME_ASSISTANT_BASE_URL,
     homeAssistantToken: process.env.HOME_ASSISTANT_TOKEN,

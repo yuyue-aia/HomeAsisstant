@@ -13,7 +13,7 @@
     "agent:ask": "tsx src/cli/cli.ts ask",
     "kws:download-model": "mkdir -p models && cd models && if [ ! -d sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01 ]; then curl -L -o sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 && tar -xjf sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2 && rm sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2; fi",
     "kws:test": "node demos/kws-file-demo.js",
-    "kws:test:xiaoyu": "node demos/kws-file-demo.js --keywords models/kws/keywords-xiaoyu.txt"
+    "kws:test:caibao": "node demos/kws-file-demo.js --keywords models/kws/keywords-caibao.txt"
   },
   "dependencies": {
     "@openai/agents": "^0.11.4",

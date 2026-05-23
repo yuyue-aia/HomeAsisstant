@@ -1,6 +1,7 @@
 import { loadConfig, requireOpenAIConfig, requireTencentConfig } from '../config/env';
 import { logger } from '../common/logger';
 import { DialogSession, type TtsAudioEvent } from '../dialog/dialog-session';
+import { readKeywordDisplays } from '../wake/wake-word-service';
 import { Microphone, playAudioBuffer } from './audio-io';
 
 /**
@@ -12,6 +13,7 @@ import { Microphone, playAudioBuffer } from './audio-io';
 export class VoiceService {
   private readonly session: DialogSession;
   private readonly mic: Microphone;
+  private readonly wakeKeyword: string;
   /** TTS 顺序播放队列；保证多段音频不重叠 */
   private playChain: Promise<void> = Promise.resolve();
   private pendingPlaybackCount = 0;
@@ -26,6 +28,7 @@ export class VoiceService {
 
     this.session = new DialogSession({ config });
     this.mic = new Microphone();
+    this.wakeKeyword = readKeywordDisplays(config.kwsKeywordsFile)[0] || '唤醒词';
 
     this.bindSessionEvents();
   }
@@ -95,7 +98,7 @@ export class VoiceService {
     if (this.session.getState() === 'listening') {
       console.log('[followup] 可以继续说，不需要唤醒词；8 秒无输入将结束。');
     } else if (this.session.getState() === 'idle') {
-      console.log('[ready] 请再次说唤醒词："小余小余"');
+      console.log(`[ready] 请再次说唤醒词："${this.wakeKeyword}"`);
     }
   }
 
@@ -116,7 +119,7 @@ export class VoiceService {
     });
     this.mic.start();
 
-    console.log('Home Voice Assistant 已启动，请说唤醒词："小余小余"');
+    console.log(`Home Voice Assistant 已启动，请说唤醒词："${this.wakeKeyword}"`);
     console.log('Ctrl+C 退出，或运行 `npm run stop` 关闭后台进程。');
   }
 

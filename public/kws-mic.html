@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>小余小余唤醒词测试</title>
+  <title>菜包菜包唤醒词测试</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; line-height: 1.6; }
     button { font-size: 16px; padding: 10px 18px; margin-right: 8px; }
@@ -13,8 +13,8 @@
   </style>
 </head>
 <body>
-  <h1>小余小余唤醒词测试</h1>
-  <p>点击开始后，浏览器会请求麦克风权限。对着电脑说“小余小余”，检测结果会显示在下方。</p>
+  <h1>菜包菜包唤醒词测试</h1>
+  <p>点击开始后，浏览器会请求麦克风权限。对着电脑说"菜包菜包"，检测结果会显示在下方。</p>
   <button id="start">开始监听</button>
   <button id="stop" disabled>停止</button>
   <div class="status" id="status">未开始</div>
@@ -106,7 +106,7 @@
         startButton.disabled = true;
         stopButton.disabled = false;
         setStatus(`监听中：输入采样率 ${audioContext.sampleRate}Hz，发送 ${TARGET_SAMPLE_RATE}Hz PCM`);
-        log('开始监听，请说“小余小余”');
+        log('开始监听，请说“菜包菜包”');
       };
 
       ws.onmessage = (event) => {
