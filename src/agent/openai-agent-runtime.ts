@@ -20,13 +20,21 @@ import { getCurrentTimeTool } from './tools/get-current-time.tool';
 import { webSearchTool } from './tools/web-search.tool';
 import { readFileTool, writeFileTool } from './tools/file-system.tool';
 import { manageReminderTool } from './tools/reminder.tool';
+import { createLoadSkillTool } from './tools/load-skill.tool';
+import { discoverSkills, buildSkillsPromptSection } from './skills/skill-loader';
 import {
   createLangfuseTracerFromEnv,
   type LangfuseTracingProcessor,
 } from './tracing/langfuse-tracer';
 import type { RunVoiceAgentInput, RunVoiceAgentOutput, VoiceAgentContext } from './types';
 
-const DEFAULT_INSTRUCTIONS = `
+/**
+ * 通用基线 instructions：
+ * 只保留全局口播规范 + 工具使用底线。
+ * 各领域（游戏/空调/提醒/...）的具体规则放到 skills/<name>/SKILL.md，
+ * LLM 看到 buildSkillsPromptSection 注入的清单后，按需调 load_skill 加载。
+ */
+const BASE_INSTRUCTIONS = `
 你是家里的语音助手"小语"。所有回答都会被 TTS 朗读。
 
 【输出格式】
@@ -37,52 +45,6 @@ const DEFAULT_INSTRUCTIONS = `
 【工具使用】
 - 凡是控制设备、查询设备状态、查时间、读写文件、联网搜索，一律调工具，不要凭印象回答。
 - 高风险动作（关总闸、批量关空调、删除文件等）先用一句话向用户确认再执行。
-
-【游戏管理】
-- 只能给余晓或余跃开游戏，先用对话确认是谁（不要自己猜）；其他人一律拒绝。
-- 三类请求各走一种 action：
-  · 想开游戏 → start_game，必须先问清玩多少分钟（5 到 60），不要替小朋友决定；
-  · 想停 → stop_game；
-  · 想知道还能玩多久 / 现在谁在玩 → status。
-- 听到"想玩游戏"先调 status 看一眼，没配额就直接告诉小朋友今天玩完了，不要再问分钟数。
-- 工具返回的 message 已经是面向小朋友的措辞，原样念出即可，不要复述 reason 字段。
-
-【空调】
-- 各房间空调（客厅/主卧/奶奶房间/余跃房间/余晓房间）→ control_air_conditioner。
-- 没说哪个房间，先问一句"您想控制哪个房间的空调"，不要自己挑。
-- "开空调到二十六度"这种组合指令，先 turn_on 再 set_temperature，最后用一句话播报结果。
-- 升温/降温没说具体度数时，delta 默认按2度。
-- 用户只说"有点热/有点冷"不算控制指令，先问"要帮您开空调吗"，不要自己开。
-- 批量操作（如关所有空调）先用一句话确认，再按房间逐个调用。
-
-【提醒】
-- 用户说"提醒我...""到点喊我..."→ 调 manage_reminder action=create。
-- 时间解析由你来做：先调 get_current_time 取当前本机时间，再把"明天下午4点""10 分钟后""下周一上午 9 点"
-  换算成本机时区的 ISO 8601 字符串（带 +08:00 偏移），作为 fire_at_iso 传入。
-- 提前量由你判断（这是用户体验的关键）：
-  · 需要准备/出门/接送/会议/上课/坐车/赴约这类事件 → 自动提前 15 分钟，
-    text 写成"再过十五分钟…"或"还有十五分钟…"，让用户听到时知道还有缓冲。
-    例："明天下午 4 点送余跃去打球"→ fire_at_iso=15:45，text="再过十五分钟送余跃去打球"。
-  · 吃药/喝水/起床/睡觉/打卡/烧水好了/饭好了/番茄钟到时间 这类按点即触发的 →
-    不要提前，fire_at_iso 就是用户说的时间，text 就是事件本身。
-  · 用户明确说了提前量（"提前半小时叫我""提前 5 分钟""到点叫我"）→ 严格按用户说的来，不要自作主张。
-  · 拿不准就按"按点触发"处理，不要乱加提前量。
-- 没说重复，默认 once；用户说"每天/每日"→ recurrence=daily。
-- 用户说"我有什么提醒""今天还有什么事"→ action=list。
-- 用户说"取消那个打球的提醒"→ action=cancel，把"打球"作为 query 传入。
-- 工具返回的 message 只是给你的语义提示（如"已创建提醒"），不要原样念。
-  你要根据 reminder/items/matches 里的 nextFireAtIso + recurrence + text，
-  结合当前时间，自己组织成自然中文播报：
-  · 创建确认时按用户说的原始事件时间播报（不是 fire_at_iso）：
-    例如用户说"明天下午 4 点送余跃去打球"，确认应念"好的，明天下午四点提醒你送余跃去打球"，
-    不要说"三点四十五"。
-  · once，今天/明天/后天 → 用相对词。
-  · once，更远 → 用月日："好的，五月三十号上午九点提醒你开会。"
-  · daily → 用"每天"+ 时间。
-  · list 多条按 nextFireAtIso 升序念，最多 3 条，多了说"还有 X 条"；念的时候参考 text，
-    text 已经包含了"再过十五分钟…"这种自然措辞，直接用即可。
-  · cancel ambiguous → 把每条用同样的自然中文念出来，反问"你要取消哪一个"。
-- 时间表达要口语：分钟为 0 省略；30 分可念"半"；用上午/中午/下午/晚上而不是 24 小时制。
 `.trim();
 
 export class OpenAIAgentRuntime {
@@ -101,6 +63,8 @@ export class OpenAIAgentRuntime {
   private readonly historyMaxItems: number;
   private historyWriteChain: Promise<void> = Promise.resolve();
   private readonly langfuseTracer?: LangfuseTracingProcessor;
+  /** 启动时一次性扫描的 skill 元数据列表（不含正文，正文按需 load_skill 加载）。 */
+  private readonly skills: ReturnType<typeof discoverSkills>;
   /** 多个 Runtime 实例共享同一份全局 trace processor 注册，只设一次。 */
   private static langfuseRegistered = false;
 
@@ -114,6 +78,7 @@ export class OpenAIAgentRuntime {
       Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 20,
     );
     this.history = this.loadHistoryFromDisk();
+    this.skills = discoverSkills();
 
     // 兼容第三方 OpenAI 协议网关（例如腾讯 TokenHub / DeepSeek）：
     // 1. 使用 Chat Completions API（多数三方网关不支持 Responses API）
@@ -153,7 +118,7 @@ export class OpenAIAgentRuntime {
     this.agent = new Agent<VoiceAgentContext>({
       name: 'Home Voice Assistant',
       model: config.openaiAgentModel,
-      instructions: DEFAULT_INSTRUCTIONS,
+      instructions: this.buildInstructions(),
       tools: [
         controlDeviceTool,
         controlGosundPlugTool,
@@ -164,8 +129,19 @@ export class OpenAIAgentRuntime {
         webSearchTool,
         readFileTool,
         writeFileTool,
+        createLoadSkillTool(this.skills),
       ],
     });
+  }
+
+  /**
+   * 拼装基线 instructions + 当前已发现的 skill 清单。
+   * skill 清单只有 name+description（每个 skill 一行），LLM 看到后按需 load_skill。
+   */
+  private buildInstructions(): string {
+    const section = buildSkillsPromptSection(this.skills);
+    if (!section) return BASE_INSTRUCTIONS;
+    return `${BASE_INSTRUCTIONS}\n\n${section}`;
   }
 
   async run(input: RunVoiceAgentInput): Promise<RunVoiceAgentOutput> {
