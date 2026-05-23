@@ -16,6 +16,8 @@ export interface AppConfig {
   ttsSampleRate: number;
   ttsCodec: 'mp3' | 'wav' | 'pcm';
   ttsSpeed: number;
+  /** 是否走 WebSocket 流式 TTS（需在腾讯云控制台单独开通"实时语音合成"服务） */
+  ttsStreaming: boolean;
 
   kwsModelDir: string;
   kwsKeywordsFile: string;
@@ -53,6 +55,7 @@ export function loadConfig(): AppConfig {
     ttsSampleRate: intEnv('TTS_SAMPLE_RATE', 16000),
     ttsCodec: (strEnv('TTS_CODEC', 'mp3') as AppConfig['ttsCodec']),
     ttsSpeed: intEnv('TTS_SPEED', 0),
+    ttsStreaming: (process.env.TTS_STREAMING ?? '').toLowerCase() === 'true',
 
     kwsModelDir: strEnv(
       'KWS_MODEL_DIR',

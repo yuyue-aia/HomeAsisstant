@@ -136,6 +136,11 @@ export class DialogSession extends EventEmitter {
     return this.state;
   }
 
+  /** 诊断用：把唤醒服务的滚动 PCM 窗口落盘成 wav；需启用 WAKE_DIAG */
+  dumpWakeDiag(label = 'manual'): string | null {
+    return this.wake.dumpDiag(label);
+  }
+
   /** 投喂 16k 16bit PCM。idle 时进唤醒检测，listening 时同时转发到 ASR */
   acceptPcm16(pcm: Buffer): void {
     if (this.state === 'idle') {
@@ -361,10 +366,30 @@ export class DialogSession extends EventEmitter {
         .catch(() => undefined)
         .then(async () => {
           try {
-            const result = await this.tts.synthesize({
-              text: segment,
-              sessionId: this.sessionId,
-            });
+            // 默认走 REST 一次性接口（稳定）。如果在 env 里打开 TTS_STREAMING=true，
+            // 改走 WebSocket 流式接口，首包更快——但需要在腾讯云控制台开通"实时语音合成"。
+            let audio: Buffer;
+            let codec: 'mp3' | 'wav' | 'pcm';
+            let sampleRate: number;
+            if (this.config.ttsStreaming) {
+              const handle = this.tts.synthesizeStream({
+                text: segment,
+                sessionId: this.sessionId,
+                codec: 'pcm',
+              });
+              const collected = await handle.collect();
+              audio = collected.audio;
+              codec = collected.meta.codec;
+              sampleRate = collected.meta.sampleRate;
+            } else {
+              const result = await this.tts.synthesize({
+                text: segment,
+                sessionId: this.sessionId,
+              });
+              audio = result.audio;
+              codec = result.codec;
+              sampleRate = result.sampleRate;
+            }
             if (idx === 0) {
               firstSegmentTime = Date.now();
             }
@@ -372,9 +397,9 @@ export class DialogSession extends EventEmitter {
               index: idx,
               total: -1, // 流式期间未知，最后 tts-end 时再告诉上层
               segmentText: segment,
-              audio: result.audio,
-              codec: result.codec,
-              sampleRate: result.sampleRate,
+              audio,
+              codec,
+              sampleRate,
             };
             hasAudio = true;
             this.emit('tts', event);

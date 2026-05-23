@@ -131,4 +131,9 @@ export class VoiceService {
     // 等当前正在播放的最后一段播完，避免截断
     await this.playChain.catch(() => undefined);
   }
+
+  /** 诊断：把麦克风滚动窗口存成 wav，返回路径。需启用 WAKE_DIAG=1 */
+  dumpWakeDiag(label = 'manual'): string | null {
+    return this.session.dumpWakeDiag(label);
+  }
 }

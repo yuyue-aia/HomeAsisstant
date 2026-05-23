@@ -9,67 +9,32 @@ import { controlGosundPlugTool } from './tools/gosund-plug.tool';
 import { controlAirConditionerTool } from './tools/air-conditioner.tool';
 import { controlGameConsoleTool } from './tools/game-console.tool';
 import { getCurrentTimeTool } from './tools/get-current-time.tool';
-import { executeWebSearch, webSearchTool } from './tools/web-search.tool';
+import { webSearchTool } from './tools/web-search.tool';
 import { readFileTool, writeFileTool } from './tools/file-system.tool';
 import type { RunVoiceAgentInput, RunVoiceAgentOutput, VoiceAgentContext } from './types';
 
 const DEFAULT_INSTRUCTIONS = `
-你是家庭智能语音助手。
-回答要简短、自然，适合语音播报。
-如果用户只是聊天或询问信息，直接简洁回答。
-只要用户明确说"联网/搜索/查一下/实时/最新/天气/新闻"等需要外部实时信息的意图，必须先调用 web_search，再基于搜索结果回答；不要直接声称无法联网。
-如果用户输入里已经带有"系统已执行 web_search"的搜索结果，直接基于这些结果回答，不要重复搜索，除非结果明显不足。
-如果需要读取或写入工作区文件，调用 read_file/write_file。
-如果用户要求控制设备，优先调用工具，不要编造执行结果。
-对家里 Gosund/小米插线板（总开关、s1~s4、USB）的开/关/查询，调用 control_gosund_plug。
-注意：s1 插孔已专门用于 Switch 游戏机，不要用 control_gosund_plug 直接开关 s1，统一走 control_game_console。
-对各房间空调（客厅/主卧/奶奶房间/余跃房间/余晓房间）的开/关/查询，调用 control_air_conditioner。
-对小朋友（余晓 yuxiao / 余跃 yuyue）玩 Switch 游戏机的需求，调用 control_game_console：
-- 听到"我想玩游戏""打开游戏机"时：先 action="status" 查询当前配额与是否有人在玩；
-- 启动需要明确的 child 与 minutes，缺一个就追问"是余晓还是余跃""你想玩多久"；
-- 主动停止用 action="stop_game"；
-- 工具返回的 message 字段已是面向小朋友的措辞，可直接播报；不要编造剩余时间；
-- 工具返回 reason=not_weekend / no_quota / session_in_progress 时，态度温和、说明原因，不要责备。
-高风险操作必须二次确认。
+你是家里的语音助手"小语"。所有回答都会被 TTS 朗读。
+
+【输出格式】
+- 一律纯文本中文，不要 Markdown、列表符号、表格、代码块、URL、emoji。
+- 一句到三句话讲完，越短越好；不要复述用户的问题。
+- 数字按中文说法念（"二十三度"而非"23°C"）。
+
+【工具使用】
+- 凡是控制设备、查询设备状态、查时间、读写文件、联网搜索，一律调工具，不要凭印象回答。
+- web_search 可以用来进行联网搜索。
+- 高风险动作（关总闸、批量关空调、删除文件等）先用一句话向用户确认再执行。
+
+【设备分工】
+- Gosund/小米插线板（总开关、s2~s4、USB）→ control_gosund_plug
+- 各房间空调（客厅/主卧/奶奶房间/余跃房间/余晓房间）→ control_air_conditioner
+- 小朋友玩 Switch（s1 插孔，不要走 control_gosund_plug）→ control_game_console
+  · 听到"想玩游戏/打开游戏机"先 action="status"；
+  · 启动需要 child 与 minutes，缺哪个问哪个；主动停止用 action="stop_game"；
+  · 工具返回的 message 已是面向小朋友的措辞，可直接播报，不要编造剩余时间；
+  · 工具返回 not_weekend / no_quota / session_in_progress 时，温和说明原因，不责备。
 `.trim();
-
-const ONLINE_INTENT_PATTERN = /(联网|搜索|搜一下|搜一搜|查一下|查查|实时|最新|天气|新闻)/;
-
-function stripSearchIntent(text: string): string {
-  return text
-    .replace(/联网搜索/g, '')
-    .replace(/联网查一下/g, '')
-    .replace(/搜索一下/g, '')
-    .replace(/搜一下/g, '')
-    .replace(/查一下/g, '')
-    .replace(/[。！？!?]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || text.trim();
-}
-
-function formatWebSearchContext(search: Awaited<ReturnType<typeof executeWebSearch>>): string {
-  if (!search.results.length) {
-    return `系统已执行 web_search。查询：${search.query}\n结果：${search.message ?? '无结果'}`;
-  }
-
-  const results = search.results
-    .slice(0, 5)
-    .map((item, index) => {
-      const snippet = item.snippet.length > 240 ? `${item.snippet.slice(0, 240)}…` : item.snippet;
-      return `${index + 1}. ${item.title}\n   URL: ${item.url}\n   摘要: ${snippet}`;
-    })
-    .join('\n');
-
-  return `系统已执行 web_search。查询：${search.query}\n搜索服务：${search.provider}\n结果：\n${results}`;
-}
-
-async function attachForcedWebSearchIfNeeded(userText: string): Promise<string> {
-  if (!ONLINE_INTENT_PATTERN.test(userText)) return userText;
-
-  const query = stripSearchIntent(userText);
-  const search = await executeWebSearch({ query, maxResults: 5 });
-  return `${userText}\n\n${formatWebSearchContext(search)}\n\n请基于以上联网搜索结果，用简短自然的中文回答。`;
-}
 
 export class OpenAIAgentRuntime {
   private readonly config: AppConfig;
@@ -143,10 +108,9 @@ export class OpenAIAgentRuntime {
       historyBefore: this.history.length,
     });
 
-    const agentInput = await attachForcedWebSearchIfNeeded(input.text);
     const turnInput: AgentInputItem[] = [
       ...this.history,
-      { role: 'user', content: agentInput },
+      { role: 'user', content: input.text },
     ];
 
     const result = await this.runner.run(this.agent, turnInput, {
@@ -177,6 +141,7 @@ export class OpenAIAgentRuntime {
     input: RunVoiceAgentInput,
     onTextDelta: (delta: string) => void,
   ): Promise<RunVoiceAgentOutput> {
+    const startedAt = Date.now();
     logger.info('agent.runStream.start', {
       sessionId: input.sessionId,
       textLength: input.text.length,
@@ -184,10 +149,9 @@ export class OpenAIAgentRuntime {
       historyBefore: this.history.length,
     });
 
-    const agentInput = await attachForcedWebSearchIfNeeded(input.text);
     const turnInput: AgentInputItem[] = [
       ...this.history,
-      { role: 'user', content: agentInput },
+      { role: 'user', content: input.text },
     ];
 
     const stream = await this.runner.run(this.agent, turnInput, {
@@ -198,6 +162,7 @@ export class OpenAIAgentRuntime {
 
     let collected = '';
     let deltaCount = 0;
+    let firstDeltaAt = 0;
     try {
       for await (const event of stream) {
         if (
@@ -206,6 +171,7 @@ export class OpenAIAgentRuntime {
         ) {
           const delta = (event.data as { delta?: string }).delta ?? '';
           if (delta) {
+            if (!firstDeltaAt) firstDeltaAt = Date.now();
             collected += delta;
             deltaCount += 1;
             try {
@@ -237,6 +203,7 @@ export class OpenAIAgentRuntime {
       sessionId: input.sessionId,
       outputLength: finalText.length,
       deltaCount,
+      firstDeltaMs: firstDeltaAt ? firstDeltaAt - startedAt : -1,
       historyItems: this.history.length,
     });
 
@@ -308,11 +275,30 @@ export class OpenAIAgentRuntime {
   }
 
   /**
+   * 落盘前过滤：只保留 system / user / assistant 的文本消息，
+   * 剥掉 function_call / function_call_output（tool 调用与结果）。
+   *
+   * 原因：
+   * 1. 历史按条数截断时，可能把 tool_call 与 tool_result 切散，重启后喂回 LLM 会 400；
+   * 2. 第三方网关对 tool 历史格式宽容度不一；
+   * 3. 工具调用结果（如 web_search 5 条）token 占用大，留着会持续放大上下文成本。
+   *
+   * 代价：进程重启后 LLM 不知道之前调过哪些工具，强连续场景（如刚启动的定时器）
+   * 会失忆。可接受，因为多数家庭语音对话是独立轮次。
+   */
+  private filterHistoryForDisk(items: AgentInputItem[]): AgentInputItem[] {
+    return items.filter((item) => {
+      const role = (item as { role?: string }).role;
+      return role === 'system' || role === 'user' || role === 'assistant';
+    });
+  }
+
+  /**
    * 串行化持久化：用 historyWriteChain 保证多次 run 的写入按顺序落盘，
    * 避免后一次写入被前一次覆盖。写入采用 tmp + rename 原子替换。
    */
   private scheduleHistoryFlush(): void {
-    const snapshot = this.history;
+    const snapshot = this.filterHistoryForDisk(this.history);
     this.historyWriteChain = this.historyWriteChain
       .catch(() => undefined)
       .then(async () => {

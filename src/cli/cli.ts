@@ -56,6 +56,13 @@ async function cmdStartForeground(): Promise<void> {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // 诊断：kill -USR2 <pid> 触发把最近 N 秒麦克风录音存成 wav。
+  // 仅当 WAKE_DIAG=1 时有效。
+  process.on('SIGUSR2', () => {
+    const file = service.dumpWakeDiag('signal');
+    if (file) console.log(`[wake-diag] dumped: ${file}`);
+    else console.log('[wake-diag] 未启用，请用 WAKE_DIAG=1 启动服务');
+  });
 }
 
 function cmdStartDaemon(): void {

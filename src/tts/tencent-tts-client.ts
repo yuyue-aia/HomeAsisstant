@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import WebSocket from 'ws';
 import { tts } from 'tencentcloud-sdk-nodejs-tts';
 import type { AppConfig } from '../config/env';
 import { logger } from '../common/logger';
@@ -63,10 +65,13 @@ export class TencentTtsClient {
       length: options.text.length,
     });
 
+    // ModelType=1 表示使用大模型音色（含超自然 501xxx）。
+    // 标准音色（1xxxxx）该字段忽略不影响，但 501xxx 必须带，否则报 InvalidParameterValue。
     const response = await this.client.TextToVoice({
       Text: options.text,
       SessionId: sessionId,
       VoiceType: voiceType,
+      ModelType: 1,
       Codec: codec,
       SampleRate: sampleRate,
       Speed: speed,
@@ -84,6 +89,98 @@ export class TencentTtsClient {
     });
 
     return { audio, codec, sampleRate, sessionId };
+  }
+
+  /**
+   * 流式合成（WebSocket）：边合成边推 PCM 二进制块，比 REST 一次性接口首包延迟低 200~400ms。
+   *
+   * 注意事项：
+   * 1. 强制 codec=pcm（mp3 流帧解码复杂，没必要）。上层用 PCM stdin 播放即可。
+   * 2. AppId 是 SDK 接口里的 `region` 之外另一个字段——腾讯 TTS 私有协议要求整型，必须从 env 读。
+   * 3. 一个 ws 连接对应一段文本（一次 SessionId）。final=1 后我们主动关闭。
+   * 4. 单段文本 ≤ 600 汉字（远高于切句器 80 字阈值，足够用）。
+   */
+  synthesizeStream(options: SynthesizeOptions): TtsStreamingHandle {
+    const codec: 'pcm' = 'pcm';
+    const sampleRate = options.sampleRate ?? this.config.ttsSampleRate;
+    const voiceType = options.voiceType ?? this.config.ttsVoiceType;
+    const speed = options.speed ?? this.config.ttsSpeed;
+    const sessionId = options.sessionId ?? randomUUID();
+
+    if (!this.config.tencentAppId) {
+      throw new Error('TTS streaming requires TENCENTCLOUD_APP_ID');
+    }
+
+    const url = this.buildStreamingUrl({
+      appId: this.config.tencentAppId,
+      secretId: this.config.tencentSecretId!,
+      secretKey: this.config.tencentSecretKey!,
+      sessionId,
+      text: options.text,
+      voiceType,
+      sampleRate,
+      codec,
+      speed,
+    });
+
+    return new TtsStreamingHandle(url, {
+      sessionId,
+      sampleRate,
+      codec,
+      textLength: options.text.length,
+    });
+  }
+
+  private buildStreamingUrl(params: {
+    appId: string;
+    secretId: string;
+    secretKey: string;
+    sessionId: string;
+    text: string;
+    voiceType: number;
+    sampleRate: number;
+    codec: 'pcm';
+    speed: number;
+  }): string {
+    const now = Math.floor(Date.now() / 1000);
+    // 文档参数表里没列、但官方 Python SDK 默认会带的字段：
+    //   - ModelType=1
+    //   - EnableSubtitle=False（注意首字母大写）
+    // 不带这两个会导致服务端 10003 鉴权失败。
+    const fields: Record<string, string | number> = {
+      Action: 'TextToStreamAudioWS',
+      AppId: Number.parseInt(params.appId, 10),
+      Codec: params.codec,
+      EnableSubtitle: 'False',
+      Expired: now + 24 * 60 * 60,
+      ModelType: 1,
+      SampleRate: params.sampleRate,
+      SecretId: params.secretId,
+      SessionId: params.sessionId,
+      Speed: params.speed,
+      Text: params.text,
+      Timestamp: now,
+      VoiceType: params.voiceType,
+      Volume: 0,
+    };
+
+    const sortedKeys = Object.keys(fields).sort();
+    const signSrc =
+      'GETtts.cloud.tencent.com/stream_ws?' +
+      sortedKeys.map((k) => `${k}=${fields[k]}`).join('&');
+    const signature = createHmac('sha1', params.secretKey).update(signSrc).digest('base64');
+
+    // 最终 URL 只对 Text 和 Signature 做 urlencode，其它参数（AppId/SecretId/数字等）保持原样。
+    const finalQs = sortedKeys
+      .map((k) => {
+        const v = fields[k];
+        if (k === 'Text') return `${k}=${encodeURIComponent(String(v))}`;
+        return `${k}=${v}`;
+      })
+      .join('&');
+
+    const url = `wss://tts.cloud.tencent.com/stream_ws?${finalQs}&Signature=${encodeURIComponent(signature)}`;
+    return url;
   }
 
   /**
@@ -170,7 +267,9 @@ export class StreamingSentenceSplitter {
 
   constructor(opts: StreamingSentenceSplitterOptions = {}) {
     this.maxLen = opts.maxLen ?? 80;
-    this.minFirstLen = opts.minFirstLen ?? 3;
+    // 首句最小长度：避免 "哈哈，" / "好的，" 这种 3 字逗号片段独占一次 TTS 往返。
+    // 8 字基本能保证首段是一个有信息量的短句。
+    this.minFirstLen = opts.minFirstLen ?? 8;
     this.minLen = opts.minLen ?? 10;
   }
 
@@ -216,14 +315,11 @@ export class StreamingSentenceSplitter {
     const isFirst = !this.firstEmitted;
     const minLen = isFirst ? this.minFirstLen : this.minLen;
 
-    // 1) 首句：任何标点（强/弱）都切，越快越好
+    // 1) 首句：只切强标点（。！？；\n），避免逗号片段过短（如 "哈哈，"）；
+    //    强标点找不到时，靠下面的 maxLen 兜底硬切，保证不会无限缓冲。
     if (isFirst) {
       for (let i = 0; i < buf.length; i += 1) {
-        if (
-          (StreamingSentenceSplitter.STRONG.test(buf[i]) ||
-            StreamingSentenceSplitter.WEAK.test(buf[i])) &&
-          i + 1 >= minLen
-        ) {
+        if (StreamingSentenceSplitter.STRONG.test(buf[i]) && i + 1 >= minLen) {
           return i;
         }
       }
@@ -247,5 +343,144 @@ export class StreamingSentenceSplitter {
     }
 
     return -1;
+  }
+}
+
+// ============================================================
+// 流式合成 Handle：包装 WebSocket 生命周期 + 事件
+// ============================================================
+
+export interface TtsStreamingMeta {
+  sessionId: string;
+  sampleRate: number;
+  codec: 'pcm';
+  textLength: number;
+}
+
+/**
+ * 一次流式合成的句柄。事件：
+ *   - 'open'  : ws 握手成功（服务端返回 code:0），可以开始期待音频
+ *   - 'audio' : (Buffer) 收到一块 PCM 数据
+ *   - 'final' : 服务端 final=1，合成完毕
+ *   - 'error' : 鉴权失败 / 网络断 / 服务端错误码
+ *   - 'close' : ws 已关闭（无论正常/异常都会触发）
+ *
+ * 提供两种消费姿势：
+ *   1. 事件订阅（适合管道到流式播放器）
+ *   2. await handle.collect() —— 收齐返回完整 Buffer（兼容旧的 playAudioBuffer）
+ */
+export class TtsStreamingHandle extends EventEmitter {
+  readonly meta: TtsStreamingMeta;
+  private readonly ws: WebSocket;
+  private opened = false;
+  private finalized = false;
+  private firstAudioAt = 0;
+  private readonly startedAt = Date.now();
+
+  constructor(url: string, meta: TtsStreamingMeta) {
+    super();
+    this.meta = meta;
+    this.ws = new WebSocket(url);
+    this.ws.binaryType = 'nodebuffer';
+
+    this.ws.on('message', (data, isBinary) => this.handleMessage(data as Buffer, isBinary));
+    this.ws.on('error', (err) => {
+      logger.warn('tts.stream.ws_error', {
+        sessionId: meta.sessionId,
+        error: err.message,
+      });
+      this.emit('error', err);
+    });
+    this.ws.on('close', (code, reason) => {
+      logger.info('tts.stream.ws_closed', {
+        sessionId: meta.sessionId,
+        code,
+        reason: reason?.toString('utf8') ?? '',
+        finalized: this.finalized,
+        firstAudioMs: this.firstAudioAt ? this.firstAudioAt - this.startedAt : -1,
+        totalMs: Date.now() - this.startedAt,
+      });
+      if (!this.finalized) {
+        this.emit(
+          'error',
+          new Error(`TTS ws closed before final (code=${code} reason=${reason?.toString('utf8') ?? ''})`),
+        );
+      }
+      this.emit('close');
+    });
+  }
+
+  private handleMessage(data: Buffer, isBinary: boolean): void {
+    if (isBinary) {
+      if (!this.firstAudioAt) {
+        this.firstAudioAt = Date.now();
+        logger.info('tts.stream.first_audio', {
+          sessionId: this.meta.sessionId,
+          firstAudioMs: this.firstAudioAt - this.startedAt,
+        });
+      }
+      this.emit('audio', data);
+      return;
+    }
+
+    let payload: { code?: number; message?: string; final?: number };
+    try {
+      payload = JSON.parse(data.toString('utf8'));
+    } catch {
+      logger.warn('tts.stream.bad_json', { raw: data.toString('utf8').slice(0, 200) });
+      return;
+    }
+
+    if (payload.code !== undefined && payload.code !== 0) {
+      this.emit(
+        'error',
+        new Error(`TTS streaming error code=${payload.code} msg=${payload.message ?? ''}`),
+      );
+      try {
+        this.ws.close();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+
+    if (!this.opened) {
+      this.opened = true;
+      this.emit('open');
+    }
+
+    if (payload.final === 1) {
+      this.finalized = true;
+      this.emit('final');
+      try {
+        this.ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** 中途取消（停说时调用） */
+  cancel(): void {
+    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      try {
+        this.ws.terminate();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * 把所有音频块拼成完整 Buffer 返回——兼容旧的「整段播放」路径。
+   * 流式 + 一次性两套都能用。
+   */
+  collect(): Promise<{ audio: Buffer; meta: TtsStreamingMeta }> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      this.on('audio', (b: Buffer) => chunks.push(b));
+      this.once('final', () => resolve({ audio: Buffer.concat(chunks), meta: this.meta }));
+      this.once('error', reject);
+    });
   }
 }

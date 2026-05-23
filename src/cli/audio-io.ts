@@ -30,6 +30,7 @@ const PLAYER_TEMPLATES: PlayerTemplate[] = [
     bin: 'ffplay',
     args: (f) => ['-loglevel', 'error', '-nodisp', '-autoexit', f],
     supports: ['mp3', 'wav', 'pcm'],
+    // ffmpeg 8 的 ffplay 移除了 -ac，改用 -ch_layout。
     pcmArgs: (rate, ch, f) => [
       '-loglevel',
       'error',
@@ -39,15 +40,17 @@ const PLAYER_TEMPLATES: PlayerTemplate[] = [
       's16le',
       '-ar',
       String(rate),
-      '-ac',
-      String(ch),
+      '-ch_layout',
+      ch === 1 ? 'mono' : ch === 2 ? 'stereo' : `${ch}c`,
       f,
     ],
   },
   {
     bin: 'afplay',
     args: (f) => [f],
-    supports: ['mp3', 'wav'],
+    supports: ['mp3', 'wav', 'pcm'],
+    // afplay 不识别 raw PCM，写文件前由调用方把 PCM 包成 WAV，这里照 wav 文件名播放即可
+    pcmArgs: (_rate, _ch, f) => [f],
   },
   {
     bin: 'mpg123',
@@ -268,6 +271,26 @@ export function createToneWavBuffer(options: {
 // Speaker
 // ============================================================
 
+/** 把 16bit PCM 包成最小 WAV（44 字节头），让只支持 wav 的播放器（afplay）也能放 */
+function wrapPcmAsWav(pcm: Buffer, sampleRate: number, channels: number): Buffer {
+  const dataSize = pcm.length;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * 2, 28);
+  header.writeUInt16LE(channels * 2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, pcm]);
+}
+
 /** 播放一段音频缓冲（mp3/wav/pcm），返回 Promise，播放完成才 resolve */
 export async function playAudioBuffer(
   audio: Buffer,
@@ -275,13 +298,19 @@ export async function playAudioBuffer(
   options: { sampleRate?: number; channels?: number } = {},
 ): Promise<void> {
   const tpl = pickPlayer(codec);
-  const ext = codec === 'pcm' ? 'raw' : codec;
+  const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+  const channels = options.channels ?? CHANNELS;
+
+  // afplay 不支持 raw PCM：包成 WAV 文件再播
+  const needWavWrap = codec === 'pcm' && tpl.bin === 'afplay';
+  const ext = needWavWrap ? 'wav' : codec === 'pcm' ? 'raw' : codec;
   const tmpFile = path.join(tmpdir(), `home-voice-${randomUUID()}.${ext}`);
-  await writeFile(tmpFile, audio);
+  const payload = needWavWrap ? wrapPcmAsWav(audio, sampleRate, channels) : audio;
+  await writeFile(tmpFile, payload);
 
   const args =
-    codec === 'pcm' && tpl.pcmArgs
-      ? tpl.pcmArgs(options.sampleRate ?? SAMPLE_RATE, options.channels ?? CHANNELS, tmpFile)
+    codec === 'pcm' && !needWavWrap && tpl.pcmArgs
+      ? tpl.pcmArgs(sampleRate, channels, tmpFile)
       : tpl.args(tmpFile);
 
   await new Promise<void>((resolve, reject) => {
@@ -298,4 +327,134 @@ export async function playAudioBuffer(
       /* ignore */
     }
   });
+}
+
+// ============================================================
+// 流式 PCM 播放器：起一个 ffplay/aplay 子进程，把 PCM 块往 stdin 喂。
+// 用于流式 TTS 链路：ws 收到第一块 PCM 立刻播放，不等整段。
+// ============================================================
+
+interface StreamingPcmPlayerTemplate {
+  bin: string;
+  args: (rate: number, channels: number) => string[];
+}
+
+/** 优先 ffplay（pipe:0 读 raw pcm），其次 aplay（Linux/树莓派） */
+const STREAMING_PCM_PLAYERS: StreamingPcmPlayerTemplate[] = [
+  {
+    bin: 'ffplay',
+    // 注意：ffmpeg 8+ 的 ffplay 移除了 -ac，声道改用 -ch_layout（mono/stereo/...）。
+    // 同时 ffplay 6/7/8 都支持 -ar；为保持向后兼容老版本，这里用 -ch_layout，
+    // 老版本 ffplay 也支持该选项（5.x+ 已有）。
+    args: (rate, ch) => [
+      '-loglevel',
+      'error',
+      '-nodisp',
+      '-autoexit',
+      '-fflags',
+      'nobuffer',
+      '-flags',
+      'low_delay',
+      '-f',
+      's16le',
+      '-ar',
+      String(rate),
+      '-ch_layout',
+      ch === 1 ? 'mono' : ch === 2 ? 'stereo' : `${ch}c`,
+      '-i',
+      'pipe:0',
+    ],
+  },
+  {
+    bin: 'aplay',
+    // aplay 默认从 stdin 读
+    args: (rate, ch) => ['-q', '-f', 'S16_LE', '-r', String(rate), '-c', String(ch)],
+  },
+];
+
+export interface StreamingPcmPlayer {
+  /** 把一块 PCM 数据写入播放器（push 模式，不阻塞） */
+  push(chunk: Buffer): void;
+  /** 通知播放器没有更多数据了，等播放完毕（resolve）或失败（reject） */
+  end(): Promise<void>;
+  /** 立即终止（停说时） */
+  abort(): void;
+}
+
+export function createStreamingPcmPlayer(opts: {
+  sampleRate?: number;
+  channels?: number;
+} = {}): StreamingPcmPlayer {
+  const sampleRate = opts.sampleRate ?? SAMPLE_RATE;
+  const channels = opts.channels ?? CHANNELS;
+
+  // 选播放器：优先 ffplay（最稳，跨平台），fallback aplay
+  let tpl: StreamingPcmPlayerTemplate | null = null;
+  for (const t of STREAMING_PCM_PLAYERS) {
+    if (commandExists(t.bin)) {
+      tpl = t;
+      break;
+    }
+  }
+  if (!tpl) {
+    throw new Error(
+      '流式 PCM 播放需要 ffplay（推荐）或 aplay。请安装 ffmpeg：brew install ffmpeg / apt install ffmpeg',
+    );
+  }
+
+  const child = spawn(tpl.bin, tpl.args(sampleRate, channels), {
+    stdio: ['pipe', 'ignore', 'pipe'],
+  });
+
+  let stderr = '';
+  child.stderr?.on('data', (d) => {
+    stderr += d.toString('utf8');
+  });
+
+  let exitPromise = new Promise<void>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0 || code === null) resolve();
+      else reject(new Error(`streaming player ${tpl!.bin} exit ${code}: ${stderr.trim()}`));
+    });
+  });
+
+  let aborted = false;
+
+  return {
+    push(chunk: Buffer) {
+      if (aborted) return;
+      // stdin 写入失败说明子进程已退出，直接忽略——end()/abort() 会处理 promise
+      const stdin = child.stdin;
+      if (!stdin || stdin.destroyed) return;
+      try {
+        stdin.write(chunk);
+      } catch {
+        /* ignore */
+      }
+    },
+    end() {
+      try {
+        child.stdin?.end();
+      } catch {
+        /* ignore */
+      }
+      return exitPromise;
+    },
+    abort() {
+      aborted = true;
+      try {
+        child.stdin?.destroy();
+      } catch {
+        /* ignore */
+      }
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* ignore */
+      }
+      // abort 后不再等子进程退出码（防止 reject）
+      exitPromise = Promise.resolve();
+    },
+  };
 }
