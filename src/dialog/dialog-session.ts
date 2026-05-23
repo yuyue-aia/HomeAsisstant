@@ -208,6 +208,11 @@ export class DialogSession extends EventEmitter {
     this.removeAllListeners();
   }
 
+  /** 退出前 flush trace（Langfuse / OTel BatchProcessor）。 */
+  async shutdownTracing(): Promise<void> {
+    await this.agent.shutdown();
+  }
+
   // ============================================================
   //                       state transitions
   // ============================================================

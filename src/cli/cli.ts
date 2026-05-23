@@ -188,8 +188,12 @@ async function cmdAsk(text: string): Promise<void> {
   const config = loadConfig();
   requireOpenAIConfig(config);
   const runtime = new OpenAIAgentRuntime(config);
-  const result = await runtime.run({ sessionId: randomUUID(), text });
-  console.log(result.text);
+  try {
+    const result = await runtime.run({ sessionId: randomUUID(), text });
+    console.log(result.text);
+  } finally {
+    await runtime.shutdown();
+  }
 }
 
 // ============================================================

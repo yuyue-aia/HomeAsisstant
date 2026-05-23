@@ -1,7 +1,15 @@
-import { Agent, OpenAIProvider, Runner, setOpenAIAPI, setTracingDisabled } from '@openai/agents';
+import {
+  Agent,
+  OpenAIProvider,
+  Runner,
+  setOpenAIAPI,
+  setTraceProcessors,
+  setTracingDisabled,
+  withTrace,
+} from '@openai/agents';
 import type { AgentInputItem } from '@openai/agents-core';
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { loadConfig, type AppConfig } from '../config/env';
 import { logger } from '../common/logger';
 import { controlDeviceTool } from './tools/home-assistant.tool';
@@ -11,6 +19,10 @@ import { controlGameConsoleTool } from './tools/game-console.tool';
 import { getCurrentTimeTool } from './tools/get-current-time.tool';
 import { webSearchTool } from './tools/web-search.tool';
 import { readFileTool, writeFileTool } from './tools/file-system.tool';
+import {
+  createLangfuseTracerFromEnv,
+  type LangfuseTracingProcessor,
+} from './tracing/langfuse-tracer';
 import type { RunVoiceAgentInput, RunVoiceAgentOutput, VoiceAgentContext } from './types';
 
 const DEFAULT_INSTRUCTIONS = `
@@ -50,22 +62,26 @@ export class OpenAIAgentRuntime {
   /**
    * 永久会话历史（多轮上下文）。
    * - 内存里以 result.history 为准（含 system / user / assistant / tool_call / tool_result）；
-   * - 每轮 run 完成后异步写入 historyFile，进程重启后从该文件恢复；
-   * - 通过 OPENAI_AGENT_HISTORY_MAX 控制条数上限，避免文件无限增长。
+   * - 每轮 run 完成后异步写入当天对应的 history 文件，进程重启后只从当天文件恢复；
+   * - 历史按天分片存储（YYYY-MM-DD.json），加载时仅读当天分片，跨天自动失忆；
+   * - 通过 OPENAI_AGENT_HISTORY_MAX 控制单日条数上限，避免文件无限增长。
    */
   private history: AgentInputItem[] = [];
-  private readonly historyFile: string;
+  private readonly historyDir: string;
   private readonly historyMaxItems: number;
   private historyWriteChain: Promise<void> = Promise.resolve();
+  private readonly langfuseTracer?: LangfuseTracingProcessor;
+  /** 多个 Runtime 实例共享同一份全局 trace processor 注册，只设一次。 */
+  private static langfuseRegistered = false;
 
   constructor(config: AppConfig = loadConfig()) {
     this.config = config;
-    this.historyFile = resolve(
-      process.env.OPENAI_AGENT_HISTORY_FILE || '.runtime/agent-history.json',
+    this.historyDir = resolve(
+      process.env.OPENAI_AGENT_HISTORY_DIR || '.runtime/agent-history',
     );
     this.historyMaxItems = Math.max(
       0,
-      Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 40,
+      Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 20,
     );
     this.history = this.loadHistoryFromDisk();
 
@@ -74,7 +90,22 @@ export class OpenAIAgentRuntime {
     // 2. 通过 OpenAIProvider 注入自定义 baseURL 与 apiKey
     if (config.openaiBaseUrl) {
       setOpenAIAPI('chat_completions');
-      // 第三方网关无法上报 trace，全局关闭以避免无意义的 401 噪声
+    }
+
+    // Langfuse 接入：
+    //  - 配置齐全 → 用 setTraceProcessors 替换默认 OpenAI exporter（避免它去
+    //    上报到 platform.openai.com 引发 401），把 trace 通过 OTLP 发到 Langfuse；
+    //  - 未配置 → 退回原行为（第三方网关下整体关闭 trace，避免无意义噪声）。
+    this.langfuseTracer = createLangfuseTracerFromEnv();
+    const tracingEnabled = !!this.langfuseTracer;
+    if (this.langfuseTracer && !OpenAIAgentRuntime.langfuseRegistered) {
+      setTraceProcessors([this.langfuseTracer]);
+      setTracingDisabled(false);
+      OpenAIAgentRuntime.langfuseRegistered = true;
+      logger.info('agent.tracing.langfuse_enabled', {
+        baseUrl: process.env.LANGFUSE_BASE_URL,
+      });
+    } else if (!this.langfuseTracer && config.openaiBaseUrl) {
       setTracingDisabled(true);
     }
 
@@ -86,7 +117,7 @@ export class OpenAIAgentRuntime {
 
     this.runner = new Runner({
       modelProvider,
-      tracingDisabled: true, // 第三方网关不支持上传 trace
+      tracingDisabled: !tracingEnabled,
     });
 
     this.agent = new Agent<VoiceAgentContext>({
@@ -120,10 +151,18 @@ export class OpenAIAgentRuntime {
       { role: 'user', content: input.text },
     ];
 
-    const result = await this.runner.run(this.agent, turnInput, {
-      context: this.buildContext(input),
-      maxTurns: 500,
-    });
+    const result = await withTrace(
+      'voice.turn',
+      async () =>
+        this.runner.run(this.agent, turnInput, {
+          context: this.buildContext(input),
+          maxTurns: 500,
+        }),
+      {
+        groupId: input.sessionId,
+        metadata: this.buildTraceMetadata(input),
+      },
+    );
 
     this.commitHistory(turnInput, result.history ?? []);
     const text = String(result.finalOutput ?? '').trim();
@@ -161,11 +200,19 @@ export class OpenAIAgentRuntime {
       { role: 'user', content: input.text },
     ];
 
-    const stream = await this.runner.run(this.agent, turnInput, {
-      context: this.buildContext(input),
-      maxTurns: 500,
-      stream: true,
-    });
+    const stream = await withTrace(
+      'voice.turn',
+      async () =>
+        this.runner.run(this.agent, turnInput, {
+          context: this.buildContext(input),
+          maxTurns: 500,
+          stream: true,
+        }),
+      {
+        groupId: input.sessionId,
+        metadata: { ...this.buildTraceMetadata(input), streaming: true },
+      },
+    );
 
     let collected = '';
     let deltaCount = 0;
@@ -228,6 +275,20 @@ export class OpenAIAgentRuntime {
     };
   }
 
+  /**
+   * 拼装传入 withTrace 的 metadata。
+   * 字段命名遵循 Langfuse OTel 约定，processor 会把它们映射成
+   * langfuse.trace.input / langfuse.user.id / langfuse.session.id。
+   */
+  private buildTraceMetadata(input: RunVoiceAgentInput): Record<string, unknown> {
+    return {
+      input: input.text,
+      session_id: input.sessionId,
+      ...(input.userId ? { user_id: input.userId } : {}),
+      model: this.config.openaiAgentModel,
+    };
+  }
+
   private commitHistory(turnInput: AgentInputItem[], sdkHistory: AgentInputItem[]): void {
     // SDK 的 result.history = input + newItems。
     // chat_completions 模式 + 部分第三方网关下，SDK 仅返回本轮 newItems（不带 input），
@@ -256,14 +317,47 @@ export class OpenAIAgentRuntime {
     this.scheduleHistoryFlush();
   }
 
+  /**
+   * 进程退出前调用：把 BatchSpanProcessor 队列里残留的 trace 立即上报。
+   * 不调的话最后一两轮对话的 trace 可能丢失（队列还没到批量延迟就被 SIGTERM）。
+   */
+  async shutdown(): Promise<void> {
+    if (!this.langfuseTracer) return;
+    try {
+      await this.langfuseTracer.forceFlush();
+      await this.langfuseTracer.shutdown();
+    } catch (error) {
+      logger.warn('agent.tracing.shutdown_failed', {
+        error: (error as Error).message,
+      });
+    }
+  }
+
   // ------------------------------------------------------------
   //                       persistence
   // ------------------------------------------------------------
 
+  /** 当天 history 分片文件路径，按本地时区算 YYYY-MM-DD。 */
+  private getTodayHistoryFile(): string {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return join(this.historyDir, `${y}-${m}-${d}.json`);
+  }
+
   private loadHistoryFromDisk(): AgentInputItem[] {
+    const file = this.getTodayHistoryFile();
     try {
-      if (!existsSync(this.historyFile)) return [];
-      const raw = readFileSync(this.historyFile, 'utf8');
+      if (!existsSync(file)) {
+        logger.info('agent.history.loaded', {
+          file,
+          items: 0,
+          reason: 'no_today_file',
+        });
+        return [];
+      }
+      const raw = readFileSync(file, 'utf8');
       if (!raw.trim()) return [];
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
@@ -273,7 +367,7 @@ export class OpenAIAgentRuntime {
           ? parsed.slice(parsed.length - this.historyMaxItems)
           : parsed;
       logger.info('agent.history.loaded', {
-        file: this.historyFile,
+        file,
         items: truncated.length,
         rawItems: parsed.length,
         truncated: truncated.length !== parsed.length,
@@ -281,7 +375,7 @@ export class OpenAIAgentRuntime {
       return truncated as AgentInputItem[];
     } catch (error) {
       logger.warn('agent.history.load_failed', {
-        file: this.historyFile,
+        file,
         error: (error as Error).message,
       });
       return [];
@@ -310,21 +404,24 @@ export class OpenAIAgentRuntime {
   /**
    * 串行化持久化：用 historyWriteChain 保证多次 run 的写入按顺序落盘，
    * 避免后一次写入被前一次覆盖。写入采用 tmp + rename 原子替换。
+   *
+   * 落盘到当天分片文件（YYYY-MM-DD.json），跨天后老文件保留在磁盘上不删除，
+   * 但下次启动只读当天的——等价于"自动失忆"昨天的对话。
    */
   private scheduleHistoryFlush(): void {
     const snapshot = this.filterHistoryForDisk(this.history);
+    const file = this.getTodayHistoryFile();
     this.historyWriteChain = this.historyWriteChain
       .catch(() => undefined)
       .then(async () => {
         try {
-          const dir = dirname(this.historyFile);
-          mkdirSync(dir, { recursive: true });
-          const tmp = `${this.historyFile}.tmp`;
+          mkdirSync(this.historyDir, { recursive: true });
+          const tmp = `${file}.tmp`;
           writeFileSync(tmp, JSON.stringify(snapshot), 'utf8');
-          renameSync(tmp, this.historyFile);
+          renameSync(tmp, file);
         } catch (error) {
           logger.warn('agent.history.save_failed', {
-            file: this.historyFile,
+            file,
             error: (error as Error).message,
           });
         }

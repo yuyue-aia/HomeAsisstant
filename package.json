@@ -5,7 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "start": "tsx src/cli/cli.ts start",
+    "start": "NODE_OPTIONS=\"--disable-warning=DEP0040\" tsx src/cli/cli.ts start",
     "stop": "tsx src/cli/cli.ts stop",
     "status": "tsx src/cli/cli.ts status",
     "logs": "tsx src/cli/cli.ts logs",
@@ -17,6 +17,11 @@
   },
   "dependencies": {
     "@openai/agents": "^0.11.4",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
     "dotenv": "^17.4.2",
     "node-microphone": "^0.2.0",
     "sherpa-onnx-node": "^1.13.2",

@@ -130,6 +130,8 @@ export class VoiceService {
     this.session.dispose();
     // 等当前正在播放的最后一段播完，避免截断
     await this.playChain.catch(() => undefined);
+    // flush 上报 trace（如果开启了 Langfuse）
+    await this.session.shutdownTracing().catch(() => undefined);
   }
 
   /** 诊断：把麦克风滚动窗口存成 wav，返回路径。需启用 WAKE_DIAG=1 */
