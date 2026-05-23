@@ -4,7 +4,7 @@ import type { AppConfig } from '../config/env';
 import { logger } from '../common/logger';
 import { WakeWordService } from '../wake/wake-word-service';
 import { TencentAsrClient, type AsrResult } from '../asr/tencent-asr-client';
-import { TencentTtsClient, splitForTts } from '../tts/tencent-tts-client';
+import { TencentTtsClient, splitForTts, StreamingSentenceSplitter } from '../tts/tencent-tts-client';
 import { OpenAIAgentRuntime } from '../agent/openai-agent-runtime';
 import { getGameConsoleController } from '../services/game-console-controller';
 
@@ -338,20 +338,124 @@ export class DialogSession extends EventEmitter {
     this.setState('thinking', { userText });
     this.emit('asr', { type: 'final-complete', text: userText });
 
+    // 进入 speaking 状态：流式期间也要让上层（voice-service）静音麦克风。
+    // 注意 setState 的 idempotent 守卫——thinking → speaking 第一次 setState 时切。
+    let speakingStarted = false;
+    let segmentIndex = 0;
+    const splitter = new StreamingSentenceSplitter();
+    /** 串行 TTS 队列：保证多段合成按顺序 emit，避免乱序播放 */
+    let ttsChain: Promise<void> = Promise.resolve();
+    let hasAudio = false;
+    let firstSegmentTime = 0;
+
+    const flushSegment = (segment: string): void => {
+      if (!segment) return;
+      if (!speakingStarted) {
+        speakingStarted = true;
+        this.setState('speaking');
+      }
+      const idx = segmentIndex;
+      segmentIndex += 1;
+
+      ttsChain = ttsChain
+        .catch(() => undefined)
+        .then(async () => {
+          try {
+            const result = await this.tts.synthesize({
+              text: segment,
+              sessionId: this.sessionId,
+            });
+            if (idx === 0) {
+              firstSegmentTime = Date.now();
+            }
+            const event: TtsAudioEvent = {
+              index: idx,
+              total: -1, // 流式期间未知，最后 tts-end 时再告诉上层
+              segmentText: segment,
+              audio: result.audio,
+              codec: result.codec,
+              sampleRate: result.sampleRate,
+            };
+            hasAudio = true;
+            this.emit('tts', event);
+          } catch (error) {
+            logger.error('dialog.tts.error', {
+              error: (error as Error).message,
+              segment,
+            });
+            this.emit('error', error as Error);
+          }
+        });
+    };
+
     let answer = '';
+    const startedAt = Date.now();
     try {
-      const result = await this.agent.run({ sessionId: this.sessionId, text: userText });
-      answer = result.text || '抱歉，我没有想到答案。';
+      const result = await this.agent.runStream(
+        { sessionId: this.sessionId, text: userText },
+        (delta) => {
+          // 流式收到 token 增量，丢给切句器；满一句就立即送 TTS 合成
+          for (const segment of splitter.push(delta)) {
+            flushSegment(segment);
+          }
+        },
+      );
+      answer = (result.text || '').trim();
+
+      // 流结束：把残余 buffer 作为最后一句吐出
+      for (const segment of splitter.end()) {
+        flushSegment(segment);
+      }
+
+      // 兜底：如果整轮 LLM 一个 delta 都没有（比如纯 tool call 链路），
+      // 退化到非流式整段 TTS，保证能播报。
+      if (segmentIndex === 0 && answer) {
+        for (const segment of splitForTts(answer)) {
+          flushSegment(segment);
+        }
+      }
+
+      if (!answer && segmentIndex === 0) {
+        answer = '抱歉，我没有想到答案。';
+        for (const segment of splitForTts(answer)) {
+          flushSegment(segment);
+        }
+      }
     } catch (error) {
       logger.error('dialog.agent.error', { error: (error as Error).message });
-      answer = '抱歉，我刚才走神了，请再说一次。';
+      const fallback = '抱歉，我刚才走神了，请再说一次。';
+      for (const segment of splitForTts(fallback)) {
+        flushSegment(segment);
+      }
+      answer = fallback;
       this.emit('error', error as Error);
+    }
+
+    // 等所有 TTS 段全部 emit 完
+    await ttsChain.catch(() => undefined);
+
+    // 没有任何可播报片段（极端情况）：跳过 speaking
+    if (!speakingStarted) {
+      this.emit('agent', { text: answer } satisfies AgentTextEvent);
+      this.conversationTurns += 1;
+      this.emit('tts-end', { hasAudio: false });
+      this.afterSpeakingComplete();
+      return;
     }
 
     this.emit('agent', { text: answer } satisfies AgentTextEvent);
     this.conversationTurns += 1;
 
-    await this.speakAndWaitForPlayback(answer);
+    logger.info('dialog.runStream.timing', {
+      sessionId: this.sessionId,
+      totalMs: Date.now() - startedAt,
+      firstSegmentMs: firstSegmentTime ? firstSegmentTime - startedAt : -1,
+      segments: segmentIndex,
+    });
+
+    this.emit('tts-end', { hasAudio });
+    // 注意：tts-end 后 voice-service 会在播放队列空时调用 notifyPlaybackComplete，
+    // 这里不需要主动调用 afterSpeakingComplete。
   }
 
   private async speakAndWaitForPlayback(text: string): Promise<void> {

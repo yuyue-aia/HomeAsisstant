@@ -144,55 +144,131 @@ export class OpenAIAgentRuntime {
     });
 
     const agentInput = await attachForcedWebSearchIfNeeded(input.text);
-
-    // 拼接历史 + 本轮 user message，走官方多轮对话方案
     const turnInput: AgentInputItem[] = [
       ...this.history,
       { role: 'user', content: agentInput },
     ];
 
     const result = await this.runner.run(this.agent, turnInput, {
-      context: {
-        sessionId: input.sessionId,
-        userId: input.userId,
-        homeAssistant: {
-          baseUrl: this.config.homeAssistantBaseUrl,
-          token: this.config.homeAssistantToken,
-        },
-      },
+      context: this.buildContext(input),
       maxTurns: 500,
     });
 
+    this.commitHistory(turnInput, result.history ?? []);
+    const text = String(result.finalOutput ?? '').trim();
+
+    logger.info('agent.run.end', {
+      sessionId: input.sessionId,
+      outputLength: text.length,
+      historyItems: this.history.length,
+    });
+
+    return { text };
+  }
+
+  /**
+   * 流式运行：边生成边把 token 增量通过 onTextDelta 抛给上层，
+   * 让上层可以做"句级 TTS pipeline"（首字延迟从等整段降到等首句）。
+   *
+   * 注意：onTextDelta 收到的是 LLM 直接吐出的 final assistant text 增量；
+   * tool_call 阶段的中间 token 不会进来（SDK 只在最终回答时发 output_text_delta）。
+   */
+  async runStream(
+    input: RunVoiceAgentInput,
+    onTextDelta: (delta: string) => void,
+  ): Promise<RunVoiceAgentOutput> {
+    logger.info('agent.runStream.start', {
+      sessionId: input.sessionId,
+      textLength: input.text.length,
+      model: this.config.openaiAgentModel,
+      historyBefore: this.history.length,
+    });
+
+    const agentInput = await attachForcedWebSearchIfNeeded(input.text);
+    const turnInput: AgentInputItem[] = [
+      ...this.history,
+      { role: 'user', content: agentInput },
+    ];
+
+    const stream = await this.runner.run(this.agent, turnInput, {
+      context: this.buildContext(input),
+      maxTurns: 500,
+      stream: true,
+    });
+
+    let collected = '';
+    let deltaCount = 0;
+    try {
+      for await (const event of stream) {
+        if (
+          event.type === 'raw_model_stream_event' &&
+          (event.data as { type?: string }).type === 'output_text_delta'
+        ) {
+          const delta = (event.data as { delta?: string }).delta ?? '';
+          if (delta) {
+            collected += delta;
+            deltaCount += 1;
+            try {
+              onTextDelta(delta);
+            } catch (error) {
+              logger.warn('agent.runStream.delta_callback_failed', {
+                error: (error as Error).message,
+              });
+            }
+          }
+        }
+      }
+      // 等流彻底结束（包括 tool 调用、history 收敛等）
+      await stream.completed;
+    } catch (error) {
+      logger.error('agent.runStream.error', {
+        sessionId: input.sessionId,
+        error: (error as Error).message,
+      });
+      throw error;
+    }
+
+    this.commitHistory(turnInput, stream.history ?? []);
+
+    // finalOutput 比 collected 更可靠（含 SDK 内部清洗），优先使用
+    const finalText = String(stream.finalOutput ?? collected ?? '').trim();
+
+    logger.info('agent.runStream.end', {
+      sessionId: input.sessionId,
+      outputLength: finalText.length,
+      deltaCount,
+      historyItems: this.history.length,
+    });
+
+    return { text: finalText };
+  }
+
+  private buildContext(input: RunVoiceAgentInput): VoiceAgentContext {
+    return {
+      sessionId: input.sessionId,
+      userId: input.userId,
+      homeAssistant: {
+        baseUrl: this.config.homeAssistantBaseUrl,
+        token: this.config.homeAssistantToken,
+      },
+    };
+  }
+
+  private commitHistory(turnInput: AgentInputItem[], sdkHistory: AgentInputItem[]): void {
     // SDK 的 result.history = input + newItems。
-    // 在 chat_completions 模式 + 第三方网关下，部分 SDK 版本仅返回本轮 newItems，
-    // 不会把传入的 history 折叠回来。为了健壮，这里做一次兜底：
-    //   - 若 result.history 比传入的 turnInput 还短，说明 SDK 没合并历史，手动拼接；
-    //   - 否则直接使用 result.history（标准行为）。
-    const sdkHistory = result.history ?? [];
+    // chat_completions 模式 + 部分第三方网关下，SDK 仅返回本轮 newItems（不带 input），
+    // 这里兜底拼接，保证多轮上下文不丢。
     if (sdkHistory.length >= turnInput.length) {
       this.history = sdkHistory;
     } else {
       this.history = [...turnInput, ...sdkHistory];
     }
 
-    // 限制最大条数，超过则从前面截掉（保留最近的对话）
     if (this.historyMaxItems > 0 && this.history.length > this.historyMaxItems) {
       this.history = this.history.slice(this.history.length - this.historyMaxItems);
     }
 
-    // 异步持久化，不阻塞响应
     this.scheduleHistoryFlush();
-
-    const text = String(result.finalOutput ?? '').trim();
-
-    logger.info('agent.run.end', {
-      sessionId: input.sessionId,
-      outputLength: text.length,
-      sdkHistoryItems: sdkHistory.length,
-      historyItems: this.history.length,
-    });
-
-    return { text };
   }
 
   /** 返回当前累计的会话历史条数，便于上层观测/排查。 */
