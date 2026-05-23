@@ -80,7 +80,7 @@ export class DialogSession extends EventEmitter {
     this.sessionId = randomUUID();
     this.config = options.config;
     this.maxRecordingMs = options.maxRecordingMs ?? 12_000;
-    this.followupTimeoutMs = options.followupTimeoutMs ?? 8_000;
+    this.followupTimeoutMs = options.followupTimeoutMs ?? 10_000;
     this.maxConversationTurns = options.maxConversationTurns ?? 5;
     this.silenceTimeoutMs = options.silenceTimeoutMs ?? 1500;
 

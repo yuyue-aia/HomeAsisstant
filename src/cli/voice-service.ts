@@ -8,8 +8,22 @@ import { Microphone, playAudioBuffer } from './audio-io';
  * 命令行常驻语音服务：
  *   - 用本机麦克风采 16kHz/16bit PCM，喂给 DialogSession
  *   - 接收 DialogSession 的 tts 事件，调用本机扬声器播放
- *   - 唤醒/ASR/思考/说话状态都打印到 stdout（结构化 JSON 日志）
+ *   - 控制台仅输出"对话内容"（带本地时间戳的人类可读行）；
+ *     结构化日志由 logger 写入 logs/app-YYYY-MM-DD.log。
  */
+
+/** 给控制台对话行打上本地时间戳：HH:mm:ss */
+function ts(): string {
+  const d = new Date();
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+function say(line: string): void {
+  console.log(`[${ts()}] ${line}`);
+}
+
 export class VoiceService {
   private readonly session: DialogSession;
   private readonly mic: Microphone;
@@ -35,24 +49,26 @@ export class VoiceService {
 
   private bindSessionEvents(): void {
     this.session.on('state', ({ state, prev }) => {
-      // 顶层一行可读日志，方便 tail -f 直接看
-      console.log(`[state] ${prev} → ${state}`);
+      // 状态机迁移属于内部事件，写入文件日志即可，不污染控制台对话流。
+      logger.info('dialog.state.transition', { prev, next: state });
+      // 仅在进入 idle 时给一行控制台提示，方便肉眼判断"一轮对话结束"。
+      if (state === 'idle' && prev !== 'idle') {
+        say(`[空闲] 等待唤醒词："${this.wakeKeyword}"`);
+      }
     });
     this.session.on('wake', ({ keyword }) => {
-      console.log(`[wake] keyword="${keyword}"，我在，请说指令…`);
+      say(`[唤醒] ${keyword}，我在，请说指令…`);
     });
     this.session.on('asr', (e: { type: string; text?: string; full?: string }) => {
-      if (e.type === 'partial') {
-        process.stdout.write(`\r[asr-partial] ${e.text ?? ''}     `);
-      } else if (e.type === 'final') {
-        process.stdout.write('\n');
-        console.log(`[asr-final]   ${e.text ?? ''}`);
-      } else if (e.type === 'final-complete') {
-        console.log(`[asr-complete] ${e.text ?? ''}`);
+      // 只在 final 时输出一行用户说的话；partial / final-complete 仅写文件日志。
+      if (e.type === 'final') {
+        say(`[用户] ${e.text ?? ''}`);
+      } else {
+        logger.info('dialog.asr.event', { type: e.type, text: e.text });
       }
     });
     this.session.on('agent', ({ text }) => {
-      console.log(`[agent] ${text}`);
+      say(`[小鱼] ${text}`);
     });
     this.session.on('tts', (event: TtsAudioEvent) => {
       // 不阻塞 dialog-session 的 emit；按到达顺序串行播放。
@@ -94,12 +110,17 @@ export class VoiceService {
     this.outputPlaying = false;
     if (this.stopped) return;
 
-    this.session.notifyPlaybackComplete();
-    if (this.session.getState() === 'listening') {
-      console.log('[followup] 可以继续说，不需要唤醒词；8 秒无输入将结束。');
-    } else if (this.session.getState() === 'idle') {
-      console.log(`[ready] 请再次说唤醒词："${this.wakeKeyword}"`);
-    }
+    // 子进程（afplay/ffplay/mpg123）退出 ≠ 扬声器真正播完：OS audio buffer 里
+    // 还有 100~500ms 的残音。如果立刻 notifyPlaybackComplete()，会出现
+    // "话刚说到尾音就进 idle"，长回答最后一句的最后一两个字被吞。
+    // 这里加一个固定 400ms 的兜底延迟，等 OS 音频 buffer 排空。
+    // 期间如果上层又 emit 了新的 tts（极少见），重置回 outputPlaying=true 跳过此次。
+    setTimeout(() => {
+      if (this.stopped) return;
+      // 期间又有新 tts 排进来，让新一轮 maybeCompletePlayback 决策
+      if (this.outputPlaying || this.pendingPlaybackCount > 0) return;
+      this.session.notifyPlaybackComplete();
+    }, 400);
   }
 
   private async playWakeAck(): Promise<void> {
@@ -119,8 +140,7 @@ export class VoiceService {
     });
     this.mic.start();
 
-    console.log(`Home Voice Assistant 已启动，请说唤醒词："${this.wakeKeyword}"`);
-    console.log('Ctrl+C 退出，或运行 `npm run stop` 关闭后台进程。');
+    say(`Home Voice Assistant 已启动，请说唤醒词："${this.wakeKeyword}"`);
   }
 
   async stop(): Promise<void> {
