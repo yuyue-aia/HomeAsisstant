@@ -5,3 +5,18 @@ node_modules/
 .runtime/
 models/sherpa-onnx-*/
 models/*.tar.bz2
+
+# 构建产物
+dist/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 外部参考仓库（独立 git 项目，不纳入主仓库）
+Mihome-Gosund-Plug-API/
+Xiaomi-cloud-tokens-extractor/
+
+# 临时脚本/笔记
+sogou_search.py
+dev.md

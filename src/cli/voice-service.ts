@@ -14,6 +14,9 @@ export class VoiceService {
   private readonly mic: Microphone;
   /** TTS 顺序播放队列；保证多段音频不重叠 */
   private playChain: Promise<void> = Promise.resolve();
+  private pendingPlaybackCount = 0;
+  private ttsSynthesisDone = false;
+  private outputPlaying = false;
   private stopped = false;
 
   constructor() {
@@ -33,7 +36,7 @@ export class VoiceService {
       console.log(`[state] ${prev} → ${state}`);
     });
     this.session.on('wake', ({ keyword }) => {
-      console.log(`[wake] keyword="${keyword}"，请说指令…`);
+      console.log(`[wake] keyword="${keyword}"，我在，请说指令…`);
     });
     this.session.on('asr', (e: { type: string; text?: string; full?: string }) => {
       if (e.type === 'partial') {
@@ -49,26 +52,60 @@ export class VoiceService {
       console.log(`[agent] ${text}`);
     });
     this.session.on('tts', (event: TtsAudioEvent) => {
-      // 不阻塞 dialog-session 的 emit；按到达顺序串行播放
+      // 不阻塞 dialog-session 的 emit；按到达顺序串行播放。
+      // 播放期间丢弃麦克风输入，避免扬声器回放污染下一轮唤醒检测。
+      if (event.index === 0) {
+        this.ttsSynthesisDone = false;
+      }
+      this.pendingPlaybackCount += 1;
+      this.outputPlaying = true;
       this.playChain = this.playChain
         .catch(() => undefined)
-        .then(() =>
-          playAudioBuffer(event.audio, event.codec, {
-            sampleRate: event.sampleRate,
-            channels: 1,
-          }),
-        )
-        .catch((error) => {
-          logger.error('voice.play.error', { error: (error as Error).message });
+        .then(async () => {
+          try {
+            await playAudioBuffer(event.audio, event.codec, {
+              sampleRate: event.sampleRate,
+              channels: 1,
+            });
+          } catch (error) {
+            logger.error('voice.play.error', { error: (error as Error).message });
+          } finally {
+            this.pendingPlaybackCount = Math.max(0, this.pendingPlaybackCount - 1);
+            this.maybeCompletePlayback();
+          }
         });
+    });
+    this.session.on('tts-end', () => {
+      this.ttsSynthesisDone = true;
+      this.maybeCompletePlayback();
     });
     this.session.on('error', (error: Error) => {
       logger.error('voice.session.error', { error: error.message });
     });
   }
 
+  private maybeCompletePlayback(): void {
+    if (!this.outputPlaying || !this.ttsSynthesisDone || this.pendingPlaybackCount !== 0) return;
+
+    this.ttsSynthesisDone = false;
+    this.outputPlaying = false;
+    if (this.stopped) return;
+
+    this.session.notifyPlaybackComplete();
+    if (this.session.getState() === 'listening') {
+      console.log('[followup] 可以继续说，不需要唤醒词；8 秒无输入将结束。');
+    } else if (this.session.getState() === 'idle') {
+      console.log('[ready] 请再次说唤醒词："小余小余"');
+    }
+  }
+
+  private async playWakeAck(): Promise<void> {
+    // 已废弃：唤醒应答现在由 DialogSession 通过 TTS 事件下发"在的"。
+  }
+
   start(): void {
     this.mic.on('frame', (pcm: Buffer) => {
+      if (this.outputPlaying) return;
       this.session.acceptPcm16(pcm);
     });
     this.mic.on('error', (err: Error) => {

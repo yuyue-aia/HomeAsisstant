@@ -34,10 +34,10 @@ Detected keywords: [ '文森特卡索', '法国' ]
 
 ## 4. 监听电脑麦克风测试“小余小余”
 
-启动本地服务：
+当前 `package.json` 暂未配置 `kws:mic` 脚本，可直接启动本地 Demo 服务：
 
 ```bash
-npm run kws:mic
+node demos/kws-mic-server.js
 ```
 
 然后打开：
@@ -47,6 +47,8 @@ http://localhost:3010/kws-mic.html
 ```
 
 点击“开始监听”，允许浏览器访问麦克风，然后对着电脑说“小余小余”。检测成功时，网页和终端都会显示唤醒结果。
+
+> 正式语音助手链路已封装在 `src/wake/wake-word-service.ts`，它接收外部传入的 `16kHz/16bit/mono PCM`，不直接采集麦克风。
 
 ## 5. 用 WAV 文件测试“小余小余”
 

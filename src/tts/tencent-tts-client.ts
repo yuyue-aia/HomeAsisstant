@@ -112,18 +112,25 @@ export function splitForTts(text: string, maxLen = 120): string[] {
 
   const segments: string[] = [];
   const punctuation = /[。！？!?；;\n]/;
+  const speakableText = /[A-Za-z0-9\u3400-\u9fff\uf900-\ufaff]/;
+  const pushSegment = (value: string) => {
+    const segment = value.trim();
+    if (segment && speakableText.test(segment)) {
+      segments.push(segment);
+    }
+  };
 
   let buffer = '';
   for (const ch of normalized) {
     buffer += ch;
     if (punctuation.test(ch) && buffer.length >= 8) {
-      segments.push(buffer.trim());
+      pushSegment(buffer);
       buffer = '';
     } else if (buffer.length >= maxLen) {
-      segments.push(buffer.trim());
+      pushSegment(buffer);
       buffer = '';
     }
   }
-  if (buffer.trim()) segments.push(buffer.trim());
+  pushSegment(buffer);
   return segments;
 }

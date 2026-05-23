@@ -6,13 +6,20 @@ import { WakeWordService } from '../wake/wake-word-service';
 import { TencentAsrClient, type AsrResult } from '../asr/tencent-asr-client';
 import { TencentTtsClient, splitForTts } from '../tts/tencent-tts-client';
 import { OpenAIAgentRuntime } from '../agent/openai-agent-runtime';
+import { getGameConsoleController } from '../services/game-console-controller';
 
-export type DialogState = 'idle' | 'listening' | 'thinking' | 'speaking';
+export type DialogState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'followup_wait';
+
+type ListeningMode = 'wake' | 'followup';
 
 export interface DialogSessionOptions {
   config: AppConfig;
   /** 唤醒后最长录音时长，默认 12s 自动结束 */
   maxRecordingMs?: number;
+  /** 连续对话追问等待时长，默认 8s 自动结束 */
+  followupTimeoutMs?: number;
+  /** 单次唤醒后最多连续对话轮数，默认 5 轮 */
+  maxConversationTurns?: number;
   /** ASR 静默多久后自动结束本轮，默认 1500ms（基于 ASR final 事件触发） */
   silenceTimeoutMs?: number;
 }
@@ -33,7 +40,7 @@ export interface TtsAudioEvent {
 /**
  * 单连接的对话会话状态机：
  *
- *   idle --(唤醒)--> listening --(ASR final)--> thinking --(Agent done)--> speaking --(TTS done)--> idle
+ *   idle --(唤醒)--> listening --(ASR final)--> thinking --(Agent done)--> speaking --(播放完成)--> followup_wait/listening --(超时)--> idle
  *
  * 上层（网关）只需要持续向 `acceptPcm16()` 投喂 16k 16bit 单声道 PCM，
  * 监听 'state' / 'wake' / 'asr' / 'agent' / 'tts' / 'error' 事件即可。
@@ -42,6 +49,8 @@ export class DialogSession extends EventEmitter {
   readonly sessionId: string;
   private readonly config: AppConfig;
   private readonly maxRecordingMs: number;
+  private readonly followupTimeoutMs: number;
+  private readonly maxConversationTurns: number;
   private readonly silenceTimeoutMs: number;
 
   private readonly wake: WakeWordService;
@@ -49,17 +58,29 @@ export class DialogSession extends EventEmitter {
   private readonly agent: OpenAIAgentRuntime;
   private asr?: TencentAsrClient;
 
+  /** 唤醒后立即播报的固定语（"在的"），预合成缓存，避免每次都走网络。 */
+  private wakeAckTts?: TtsAudioEvent;
+  private wakeAckPrewarmPromise?: Promise<void>;
+  private static readonly WAKE_ACK_TEXT = '在的';
+
   private state: DialogState = 'idle';
+  private listeningMode: ListeningMode = 'wake';
+  private conversationTurns = 0;
+  private endConversationAfterSpeaking = false;
   private recordingStartedAt = 0;
   private recordingTimer?: NodeJS.Timeout;
   private partialBuffer = '';
   private finalBuffer = '';
+  /** 主动播报缓冲：当对话不在可中断状态时暂存，转 idle/followup_wait 后立即播。 */
+  private pendingAnnouncements: string[] = [];
 
   constructor(options: DialogSessionOptions) {
     super();
     this.sessionId = randomUUID();
     this.config = options.config;
     this.maxRecordingMs = options.maxRecordingMs ?? 12_000;
+    this.followupTimeoutMs = options.followupTimeoutMs ?? 8_000;
+    this.maxConversationTurns = options.maxConversationTurns ?? 5;
     this.silenceTimeoutMs = options.silenceTimeoutMs ?? 1500;
 
     this.wake = new WakeWordService({ config: this.config });
@@ -67,6 +88,48 @@ export class DialogSession extends EventEmitter {
     this.agent = new OpenAIAgentRuntime(this.config);
 
     this.wake.on('wake', (e) => this.handleWake(e.keyword));
+
+    // 预热"在的"语音，避免首次唤醒时合成有延迟
+    this.wakeAckPrewarmPromise = this.prewarmWakeAck().catch((error) => {
+      logger.warn('dialog.wake_ack.prewarm_failed', { error: (error as Error).message });
+    });
+
+    // 把主动播报回调注入到游戏机控制器，让 5min/1min/到期提醒能走 TTS。
+    // 多个 DialogSession 实例时以最后创建的为准（当前架构是单实例）。
+    try {
+      getGameConsoleController().setAnnouncer((text) => this.announce(text));
+      // 启动恢复：进程崩溃后续上之前未完成的游戏会话
+      void getGameConsoleController()
+        .recoverActiveSession()
+        .catch((error) => {
+          logger.warn('dialog.game_console.recover_failed', {
+            error: (error as Error).message,
+          });
+        });
+    } catch (error) {
+      logger.warn('dialog.game_console.bind_failed', {
+        error: (error as Error).message,
+      });
+    }
+  }
+
+  private async prewarmWakeAck(): Promise<void> {
+    const result = await this.tts.synthesize({
+      text: DialogSession.WAKE_ACK_TEXT,
+      sessionId: `${this.sessionId}:wake-ack`,
+    });
+    this.wakeAckTts = {
+      index: 0,
+      total: 1,
+      segmentText: DialogSession.WAKE_ACK_TEXT,
+      audio: result.audio,
+      codec: result.codec,
+      sampleRate: result.sampleRate,
+    };
+    logger.info('dialog.wake_ack.prewarmed', {
+      sessionId: this.sessionId,
+      audioBytes: result.audio.byteLength,
+    });
   }
 
   getState(): DialogState {
@@ -90,6 +153,49 @@ export class DialogSession extends EventEmitter {
     this.asr?.end();
   }
 
+  /** 上层播放器播完所有 TTS 音频后调用，用于进入连续对话追问窗口。 */
+  notifyPlaybackComplete(): void {
+    if (this.state !== 'speaking') return;
+    this.afterSpeakingComplete();
+  }
+
+  /**
+   * 主动播报（外部模块通过此方法把一段文字交给会话播报）。
+   *  - idle / followup_wait：立即播；
+   *  - listening / thinking / speaking：缓存到 pendingAnnouncements，等回到可播状态时连播。
+   */
+  announce(text: string): void {
+    const t = text?.trim();
+    if (!t) return;
+    if (this.state === 'idle' || this.state === 'followup_wait') {
+      void this.flushAnnouncement(t);
+    } else {
+      this.pendingAnnouncements.push(t);
+      logger.info('dialog.announce.queued', {
+        sessionId: this.sessionId,
+        state: this.state,
+        pending: this.pendingAnnouncements.length,
+      });
+    }
+  }
+
+  private async flushAnnouncement(text: string): Promise<void> {
+    // 把后续也排在队里的一起拼出来，一次播报，避免多次进入 speaking 状态。
+    const queue = [text, ...this.pendingAnnouncements];
+    this.pendingAnnouncements = [];
+
+    // 进入 speaking 之前先把当前 listening 的 ASR 关掉，避免播报被自己听见
+    if (this.asr) {
+      this.asr.close();
+      this.asr = undefined;
+    }
+    this.clearRecordingTimer();
+
+    // 播报后行为：原本 idle 仍回 idle；原本 followup_wait 直接结束本轮对话。
+    this.endConversationAfterSpeaking = true;
+    await this.speakAndWaitForPlayback(queue.join(' '));
+  }
+
   /** 销毁会话，释放资源 */
   dispose(): void {
     this.clearRecordingTimer();
@@ -107,16 +213,51 @@ export class DialogSession extends EventEmitter {
     this.state = next;
     logger.info('dialog.state', { sessionId: this.sessionId, prev, next, ...meta });
     this.emit('state', { state: next, prev });
+
+    // 进入可中断状态时，flush 缓存的主动播报
+    if ((next === 'idle' || next === 'followup_wait') && this.pendingAnnouncements.length > 0) {
+      const queued = this.pendingAnnouncements.join(' ');
+      this.pendingAnnouncements = [];
+      // 异步触发，避免在状态切换里嵌套 setState
+      setImmediate(() => {
+        void this.flushAnnouncement(queued);
+      });
+    }
   }
 
   private async handleWake(keyword: string): Promise<void> {
     if (this.state !== 'idle') return;
+    this.conversationTurns = 0;
+    this.endConversationAfterSpeaking = false;
     this.emit('wake', { keyword });
-    await this.startListening();
+
+    // 唤醒后立即用本地缓存的 TTS 应答"在的"，跳过 agent，零延迟。
+    this.emitWakeAck();
+
+    await this.startListening('wake');
   }
 
-  private async startListening(): Promise<void> {
-    this.setState('listening');
+  private emitWakeAck(): void {
+    const ack = this.wakeAckTts;
+    if (!ack) {
+      // 预热还没完成（首次启动极短窗口）：异步等到好了再播，避免阻塞 listening
+      void this.wakeAckPrewarmPromise?.then(() => {
+        if (this.wakeAckTts) {
+          this.emit('tts', this.wakeAckTts);
+          this.emit('tts-end', { hasAudio: true });
+        }
+      });
+      return;
+    }
+    this.emit('tts', ack);
+    // 唤醒应答只有一段，立即标记 TTS 流结束，
+    // 让上层播放器在播完后能正确解除麦克风静音。
+    this.emit('tts-end', { hasAudio: true });
+  }
+
+  private async startListening(mode: ListeningMode): Promise<void> {
+    this.listeningMode = mode;
+    this.setState('listening', { mode });
     this.partialBuffer = '';
     this.finalBuffer = '';
     this.recordingStartedAt = Date.now();
@@ -149,12 +290,13 @@ export class DialogSession extends EventEmitter {
       return;
     }
 
-    // 录音保护超时
+    // 录音保护超时；追问模式更短，避免长时间占用 ASR。
     this.clearRecordingTimer();
+    const timeoutMs = mode === 'followup' ? this.followupTimeoutMs : this.maxRecordingMs;
     this.recordingTimer = setTimeout(() => {
-      logger.info('dialog.recording.max_timeout', { sessionId: this.sessionId });
+      logger.info('dialog.recording.max_timeout', { sessionId: this.sessionId, mode });
       this.asr?.end();
-    }, this.maxRecordingMs);
+    }, timeoutMs);
   }
 
   private armSilenceTimer(): void {
@@ -178,8 +320,14 @@ export class DialogSession extends EventEmitter {
     this.asr = undefined;
 
     if (!text) {
-      logger.info('dialog.asr.empty', { sessionId: this.sessionId });
-      this.resetToIdle();
+      logger.info('dialog.asr.empty', { sessionId: this.sessionId, mode: this.listeningMode });
+      this.endConversation();
+      return;
+    }
+
+    if (isExitPhrase(text)) {
+      this.endConversationAfterSpeaking = true;
+      await this.speakAndWaitForPlayback('好的，有需要再叫我。');
       return;
     }
 
@@ -201,16 +349,27 @@ export class DialogSession extends EventEmitter {
     }
 
     this.emit('agent', { text: answer } satisfies AgentTextEvent);
+    this.conversationTurns += 1;
 
-    await this.speak(answer);
-    this.resetToIdle();
+    await this.speakAndWaitForPlayback(answer);
   }
 
-  private async speak(text: string): Promise<void> {
+  private async speakAndWaitForPlayback(text: string): Promise<void> {
+    const hasAudio = await this.speak(text);
+    if (!hasAudio) {
+      this.afterSpeakingComplete();
+    }
+  }
+
+  private async speak(text: string): Promise<boolean> {
     this.setState('speaking');
     const segments = splitForTts(text);
-    if (segments.length === 0) return;
+    if (segments.length === 0) {
+      this.emit('tts-end', { hasAudio: false });
+      return false;
+    }
 
+    let hasAudio = false;
     for (let i = 0; i < segments.length; i += 1) {
       const segment = segments[i];
       try {
@@ -226,6 +385,7 @@ export class DialogSession extends EventEmitter {
           codec: result.codec,
           sampleRate: result.sampleRate,
         };
+        hasAudio = true;
         this.emit('tts', event);
       } catch (error) {
         logger.error('dialog.tts.error', { error: (error as Error).message });
@@ -233,6 +393,28 @@ export class DialogSession extends EventEmitter {
         break;
       }
     }
+    this.emit('tts-end', { hasAudio });
+    return hasAudio;
+  }
+
+  private afterSpeakingComplete(): void {
+    if (this.endConversationAfterSpeaking || this.conversationTurns >= this.maxConversationTurns) {
+      this.endConversation();
+      return;
+    }
+
+    this.setState('followup_wait', {
+      timeoutMs: this.followupTimeoutMs,
+      turn: this.conversationTurns,
+      maxTurns: this.maxConversationTurns,
+    });
+    void this.startListening('followup');
+  }
+
+  private endConversation(): void {
+    this.conversationTurns = 0;
+    this.endConversationAfterSpeaking = false;
+    this.resetToIdle();
   }
 
   private resetToIdle(): void {
@@ -242,8 +424,16 @@ export class DialogSession extends EventEmitter {
       this.asr = undefined;
     }
     this.wake.reset();
+    this.listeningMode = 'wake';
     this.partialBuffer = '';
     this.finalBuffer = '';
     this.setState('idle');
   }
+}
+
+function isExitPhrase(text: string): boolean {
+  const normalized = text.replace(/[\s。！？!?，,；;\.]/g, '');
+  return ['不用了', '结束', '退出', '先这样', '没事了', '停止对话'].some((phrase) =>
+    normalized.includes(phrase),
+  );
 }
