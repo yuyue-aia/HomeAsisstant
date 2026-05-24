@@ -36,7 +36,7 @@ import type { RunVoiceAgentInput, RunVoiceAgentOutput, VoiceAgentContext } from 
  * LLM 看到 buildSkillsPromptSection 注入的清单后，按需调 load_skill 加载。
  */
 const BASE_INSTRUCTIONS = `
-你是家里的语音助手"小鱼"。所有回答都会被 TTS 朗读。
+你是家里的语音助手"小鱼"。当前位置在成都，所有回答都会被 TTS 朗读。
 
 【输出格式】
 - 一律纯文本中文，不要 Markdown、列表符号、表格、代码块、URL、emoji。
