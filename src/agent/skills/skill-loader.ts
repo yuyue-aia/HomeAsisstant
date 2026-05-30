@@ -6,15 +6,19 @@
  *     <name>/
  *       SKILL.md   ← YAML frontmatter (name + description) + Markdown 正文
  *
- * 渐进式披露（Progressive Disclosure）：
- *   1. Discovery：启动时扫描所有 SKILL.md，仅解析 frontmatter，把 name+description
- *      作为清单注入到主 prompt（每个 skill 仅一行）。
- *   2. Activation：LLM 判断需要某 skill 时，调用 `load_skill` 工具拿到完整 SKILL.md。
- *   3. Execution：按 SKILL.md 指示干活；如需附带资源（scripts/references/assets）
- *      用通用文件读取工具按返回的 directory 路径访问。
+ * 两种装载模式（由 AppConfig.agentSkillsLoadMode 选择）：
+ *   - eager：启动时一次性把所有 SKILL.md 正文读出来内联到 system prompt；
+ *   - lazy：仅注入 name+description 清单，LLM 调 load_skill 按需取正文。
  *
- * 这样主 prompt 只剩"通用规则 + skill 清单"，单个领域指南只在被需要时才进上下文，
- * 既省 token 也避免不同领域规则互相干扰。
+ * 不论哪种模式，本模块的输出都必须是"字节级稳定"的——
+ * 同一份 skills/ 目录在任何机器、任何时间多次启动，得到的 prompt 段落
+ * 必须完全一致，否则会击穿上游网关的 prompt cache，把 13KB 前缀变成
+ * 每次请求都要重算的开销。
+ *
+ * 稳定性保障：
+ *   1. discoverSkills() 输出按 name 字典序排序，不依赖 readdir 顺序；
+ *   2. 所有文件读取归一化 CRLF→LF 并去掉文件末尾空白；
+ *   3. frontmatter 不进 prompt（只取 body），避免新增字段污染缓存。
  */
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -31,6 +35,11 @@ export interface SkillMeta {
   file: string;
 }
 
+export interface SkillFull extends SkillMeta {
+  /** SKILL.md 去掉 frontmatter 后的正文，已归一化换行符并去除末尾空白。 */
+  body: string;
+}
+
 /** 默认从仓库根目录的 skills/ 扫描，可通过环境变量覆盖（多目录用冒号分隔）。 */
 function getSkillSearchPaths(): string[] {
   const fromEnv = process.env.AGENT_SKILLS_DIR;
@@ -42,6 +51,19 @@ function getSkillSearchPaths(): string[] {
       .map((p) => resolve(p));
   }
   return [resolve('skills')];
+}
+
+/**
+ * 稳定读文件：
+ * - utf8 解码；
+ * - CRLF / CR 全部归一化成 LF（防御 Windows checkout 带来的换行符差异）；
+ * - 去掉文件末尾的空白字符（不同编辑器自动加/去尾随换行的差异）。
+ *
+ * 这三步保证同一份内容在不同操作系统/编辑器下产出的字节序列完全一致，
+ * 是上游 prompt cache 命中的前提。
+ */
+export function readStable(file: string): string {
+  return readFileSync(file, 'utf8').replace(/\r\n?/g, '\n').replace(/\s+$/, '');
 }
 
 /**
@@ -94,6 +116,8 @@ function parseFrontmatter(content: string): {
  *
  * 跳过：不是目录的条目、没有 SKILL.md 的目录、frontmatter 缺 name/description 的 skill。
  * 同名冲突：先发现的优先（便于将来项目级 skills 覆盖全局 skills）。
+ *
+ * 返回前按 name 字典序排序，保证 system prompt 段落字节稳定。
  */
 export function discoverSkills(): SkillMeta[] {
   const result: SkillMeta[] = [];
@@ -124,7 +148,7 @@ export function discoverSkills(): SkillMeta[] {
 
       let raw: string;
       try {
-        raw = readFileSync(file, 'utf8');
+        raw = readStable(file);
       } catch (error) {
         logger.warn('skills.discover.read_file_failed', {
           file,
@@ -148,6 +172,11 @@ export function discoverSkills(): SkillMeta[] {
       result.push({ name, description, directory: dir, file });
     }
   }
+
+  // 关键：按 name 字典序排序，去除 readdir 在不同文件系统下的顺序差异，
+  // 保证 system prompt 字节稳定（prompt cache 命中前提）。
+  // 固定使用 'en' locale，避免不同机器 LANG 环境变量导致排序结果不同。
+  result.sort((a, b) => a.name.localeCompare(b.name, 'en'));
 
   logger.info('skills.discover.done', {
     count: result.length,
@@ -174,7 +203,7 @@ export function loadSkillBody(
     };
   }
   try {
-    const raw = readFileSync(target.file, 'utf8');
+    const raw = readStable(target.file);
     const { body } = parseFrontmatter(raw);
     return {
       ok: true,
@@ -190,15 +219,41 @@ export function loadSkillBody(
   }
 }
 
-/** 把 skills 清单格式化成主 prompt 里的 `<available_skills>` 段落。 */
-export function buildSkillsPromptSection(skills: SkillMeta[]): string {
-  if (skills.length === 0) return '';
-  const lines = skills.map((s) => `- ${s.name}: ${s.description}`).join('\n');
-  return `
-【可用技能】
-当用户请求匹配下列某个技能的描述时，先调用 load_skill 工具读取它的详细指令再执行。
-不要凭印象猜测技能里的规则；同一轮里同一个技能只需加载一次。
+/**
+ * Eager 模式启动时调用：把每个 skill 的 body 一次性读到内存，避免运行中文件被改导致
+ * prompt 漂移（prompt cache 击穿），同时省掉每次 run 的磁盘 I/O。
+ */
+export function loadAllSkillBodies(skills: SkillMeta[]): SkillFull[] {
+  return skills.map((s) => {
+    const raw = readStable(s.file);
+    const { body } = parseFrontmatter(raw);
+    return { ...s, body: body.trim() };
+  });
+}
 
-${lines}
-`.trim();
+/**
+ * 拼装 lazy 模式的 skill 清单（用作 system.lazy.md 中 {{SKILLS_LIST}} 的替换值）。
+ * 每行 `- name: description`，skills 已在 discoverSkills 里排好序，这里不再二次排序。
+ */
+export function buildSkillsListBlock(skills: SkillMeta[]): string {
+  return skills.map((s) => `- ${s.name}: ${s.description}`).join('\n');
+}
+
+/**
+ * 拼装 eager 模式的 skill 全文段（用作 system.eager.md 中 {{SKILLS_INLINE}} 的替换值）。
+ * 每个 skill 之间用同样的分隔线，便于 LLM 切换上下文；
+ * 同时保留 description 作为"适用场景"提示，让 LLM 知道何时该参照该段规则。
+ */
+export function buildSkillsInlineBlock(skills: SkillFull[]): string {
+  return skills
+    .map((s) =>
+      [
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+        `### 技能：${s.name}`,
+        `适用场景：${s.description}`,
+        '',
+        s.body,
+      ].join('\n'),
+    )
+    .join('\n\n');
 }

@@ -22,7 +22,13 @@ import { readFileTool, writeFileTool } from './tools/file-system.tool';
 import { manageReminderTool } from './tools/reminder.tool';
 import { searchMusicTool, controlMusicPlayerTool } from './tools/music.tool';
 import { createLoadSkillTool } from './tools/load-skill.tool';
-import { discoverSkills, buildSkillsPromptSection } from './skills/skill-loader';
+import {
+  discoverSkills,
+  loadAllSkillBodies,
+  type SkillFull,
+  type SkillMeta,
+} from './skills/skill-loader';
+import { buildSystemPrompt } from './system-prompt-builder';
 import {
   createLangfuseTracerFromEnv,
   type LangfuseTracingProcessor,
@@ -30,23 +36,18 @@ import {
 import type { RunVoiceAgentInput, RunVoiceAgentOutput, VoiceAgentContext } from './types';
 
 /**
- * 通用基线 instructions：
- * 只保留全局口播规范 + 工具使用底线。
- * 各领域（游戏/空调/提醒/...）的具体规则放到 skills/<name>/SKILL.md，
- * LLM 看到 buildSkillsPromptSection 注入的清单后，按需调 load_skill 加载。
+ * 通用基线 instructions 已迁出到 prompts/system.base.md；
+ * 各领域规则在 skills/<name>/SKILL.md。
+ *
+ * 启动时按 config.agentSkillsLoadMode 决定 system prompt 的拼装方式：
+ *  - eager：把所有 SKILL.md 正文直接拼进 system prompt，工具列表里不放 load_skill。
+ *           少一轮 LLM round-trip，语音首字延迟低 1~2 秒。
+ *  - lazy：仅注入 skill 清单（name + description），保留 load_skill 工具，
+ *          由 LLM 按需调用读取正文。token 占用最少，但每次匹配 skill 多一轮推理。
+ *
+ * 不论哪种模式，最终 instructions 都是字节级稳定的（skill 排序固定、模板归一化），
+ * 命中上游 prompt cache 后 prefill 几乎免费。
  */
-const BASE_INSTRUCTIONS = `
-你是家里的语音助手"小鱼"。当前位置在成都，所有回答都会被 TTS 朗读。
-
-【输出格式】
-- 一律纯文本中文，不要 Markdown、列表符号、表格、代码块、URL、emoji。
-- 一句到三句话讲完，越短越好；不要复述用户的问题。
-- 数字按中文说法念（"二十三度"而非"23°C"）。
-
-【工具使用】
-- 凡是控制设备、查询设备状态、查时间、读写文件、联网搜索，一律调工具，不要凭印象回答。
-- 高风险动作（关总闸、批量关空调、删除文件等）先用一句话向用户确认再执行。
-`.trim();
 
 export class OpenAIAgentRuntime {
   private readonly config: AppConfig;
@@ -65,7 +66,9 @@ export class OpenAIAgentRuntime {
   private historyWriteChain: Promise<void> = Promise.resolve();
   private readonly langfuseTracer?: LangfuseTracingProcessor;
   /** 启动时一次性扫描的 skill 元数据列表（不含正文，正文按需 load_skill 加载）。 */
-  private readonly skills: ReturnType<typeof discoverSkills>;
+  private readonly skills: SkillMeta[];
+  /** Eager 模式下启动时一次性读出的所有 SKILL.md 正文；lazy 模式为 undefined。 */
+  private readonly skillsFull?: SkillFull[];
   /** 多个 Runtime 实例共享同一份全局 trace processor 注册，只设一次。 */
   private static langfuseRegistered = false;
 
@@ -80,6 +83,11 @@ export class OpenAIAgentRuntime {
     );
     this.history = this.loadHistoryFromDisk();
     this.skills = discoverSkills();
+    // Eager 模式启动时一次性把 SKILL.md 正文全部读到内存：
+    // - 省掉每轮 run 的磁盘 I/O；
+    // - 锁定 prompt 的字节序列，避免运行中 SKILL.md 被改导致 cache 击穿。
+    this.skillsFull =
+      config.agentSkillsLoadMode === 'eager' ? loadAllSkillBodies(this.skills) : undefined;
 
     // 兼容第三方 OpenAI 协议网关（例如腾讯 TokenHub / DeepSeek）：
     // 1. 使用 Chat Completions API（多数三方网关不支持 Responses API）
@@ -116,35 +124,42 @@ export class OpenAIAgentRuntime {
       tracingDisabled: !tracingEnabled,
     });
 
+    // 按加载模式拼装 system prompt 与工具列表：
+    // - eager：load_skill 工具不注册（skill 正文已内联），少一轮 LLM round-trip；
+    // - lazy：保留 load_skill，由 LLM 按需读取。
+    const { instructions, fingerprint, bytes } = buildSystemPrompt({
+      mode: config.agentSkillsLoadMode,
+      skills: this.skills,
+      skillsFull: this.skillsFull,
+    });
+    logger.info('agent.system_prompt.fingerprint', {
+      mode: config.agentSkillsLoadMode,
+      skillCount: this.skills.length,
+      bytes,
+      fingerprint, // 同一份配置/skills 多次启动应得到同一个 hash
+    });
+
+    const tools = [
+      controlDeviceTool,
+      controlGosundPlugTool,
+      controlAirConditionerTool,
+      controlGameConsoleTool,
+      manageReminderTool,
+      searchMusicTool,
+      controlMusicPlayerTool,
+      getCurrentTimeTool,
+      webSearchTool,
+      readFileTool,
+      writeFileTool,
+      ...(config.agentSkillsLoadMode === 'lazy' ? [createLoadSkillTool(this.skills)] : []),
+    ];
+
     this.agent = new Agent<VoiceAgentContext>({
       name: 'Home Voice Assistant',
       model: config.openaiAgentModel,
-      instructions: this.buildInstructions(),
-      tools: [
-        controlDeviceTool,
-        controlGosundPlugTool,
-        controlAirConditionerTool,
-        controlGameConsoleTool,
-        manageReminderTool,
-        searchMusicTool,
-        controlMusicPlayerTool,
-        getCurrentTimeTool,
-        webSearchTool,
-        readFileTool,
-        writeFileTool,
-        createLoadSkillTool(this.skills),
-      ],
+      instructions,
+      tools,
     });
-  }
-
-  /**
-   * 拼装基线 instructions + 当前已发现的 skill 清单。
-   * skill 清单只有 name+description（每个 skill 一行），LLM 看到后按需 load_skill。
-   */
-  private buildInstructions(): string {
-    const section = buildSkillsPromptSection(this.skills);
-    if (!section) return BASE_INSTRUCTIONS;
-    return `${BASE_INSTRUCTIONS}\n\n${section}`;
   }
 
   async run(input: RunVoiceAgentInput): Promise<RunVoiceAgentOutput> {

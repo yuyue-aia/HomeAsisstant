@@ -1,0 +1,270 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    SKILLS SYSTEM - QUICK REFERENCE                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 1. HOW TO ADD A NEW SKILL                                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Step 1: Create directory                                                    │
+│   mkdir skills/my-new-skill                                                │
+│                                                                              │
+│ Step 2: Create SKILL.md file with frontmatter                              │
+│   cat > skills/my-new-skill/SKILL.md <<EOF                                 │
+│   ---                                                                        │
+│   name: my-new-skill                                                        │
+│   description: Brief one-sentence description of what this skill does      │
+│   ---                                                                        │
+│                                                                              │
+│   # My New Skill                                                            │
+│                                                                              │
+│   ## How to use                                                             │
+│   Detailed instructions, tool mappings, decision paths, etc.                │
+│   EOF                                                                        │
+│                                                                              │
+│ Step 3: Restart agent (required for discovery)                             │
+│   Skills are discovered ONLY at startup via discoverSkills()               │
+│   NO hot-reload during runtime                                             │
+│                                                                              │
+│ Step 4: Verify discovery                                                    │
+│   Check logs for: "skills.discover.done" with your skill listed           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 2. FILE LOCATIONS & STRUCTURE                                               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Skill Loading Implementation:                                               │
+│   src/agent/skills/skill-loader.ts          ← Scan & parse skills         │
+│   src/agent/tools/load-skill.tool.ts        ← load_skill tool definition  │
+│   src/agent/openai-agent-runtime.ts         ← Integration & injection     │
+│                                                                              │
+│ Skill Storage:                                                              │
+│   skills/music/SKILL.md                                                    │
+│   skills/reminder/SKILL.md                                                 │
+│   skills/air-conditioner/SKILL.md                                          │
+│   skills/game/SKILL.md                                                     │
+│                                                                              │
+│ Optional (can be placed in skill directory):                               │
+│   skills/my-skill/scripts/                  ← Helper scripts               │
+│   skills/my-skill/references/               ← Reference docs               │
+│   skills/my-skill/assets/                   ← Images, data files           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 3. KEY FUNCTIONS & LINE NUMBERS                                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ File: src/agent/skills/skill-loader.ts                                     │
+│   discoverSkills()                 Line 98    Scan skills/, return metadata│
+│   parseFrontmatter(content)        Line 53    Extract YAML + body          │
+│   loadSkillBody(skills, name)      Line 163   Fetch body for load_skill    │
+│   buildSkillsPromptSection(skills) Line 194   Format 【可用技能】 section   │
+│                                                                              │
+│ File: src/agent/tools/load-skill.tool.ts                                   │
+│   createLoadSkillTool(skills)      Line 21    Create load_skill tool       │
+│                                                                              │
+│ File: src/agent/openai-agent-runtime.ts                                    │
+│   constructor()                    Line 72    Entry point, calls discover │
+│   buildInstructions()              Line 144   Inject skill list into prompt│
+│   OpenAIAgentRuntime.skills        Line 68    In-memory SkillMeta[]        │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 4. SYSTEM PROMPT GENERATION                                                 │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ When:     During Agent creation in OpenAIAgentRuntime constructor          │
+│ How:      buildInstructions() calls buildSkillsPromptSection()            │
+│ Where:    src/agent/openai-agent-runtime.ts line 144-148                  │
+│ Result:   System prompt = BASE_INSTRUCTIONS + 【可用技能】 section          │
+│                                                                              │
+│ Generated Format:                                                           │
+│   BASE_INSTRUCTIONS (output rules, tool usage guidelines)                  │
+│   +                                                                         │
+│   【可用技能】 section (one line per skill with description)              │
+│                                                                              │
+│ Example Output:                                                             │
+│   你是家里的语音助手"小鱼"。...                                             │
+│                                                                              │
+│   【可用技能】                                                              │
+│   当用户请求匹配下列某个技能的描述时，先调用 load_skill 工具...            │
+│                                                                              │
+│   - music: 处理"放/来首/..."等点歌与音乐控制请求                           │
+│   - reminder: 处理"提醒我..."、"到点喊我..."类请求                          │
+│   - air-conditioner: 处理空调相关控制                                      │
+│   - game: 处理小朋友想玩游戏机...                                           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 5. RUNTIME SKILL LOADING                                                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Trigger:  LLM judges user request matches a skill description             │
+│           Example: user says "放一首歌" → matches "music" description     │
+│                                                                              │
+│ Action:   LLM calls: load_skill(name: "music")                            │
+│           Tool: src/agent/tools/load-skill.tool.ts                        │
+│                                                                              │
+│ Handler:  createLoadSkillTool() callback                                   │
+│           Calls: loadSkillBody(skills, "music")                           │
+│           Reads: skills/music/SKILL.md (full content, no frontmatter)     │
+│           Returns: { ok: true, name, directory, body }                    │
+│                                                                              │
+│ Result:   LLM now has:                                                     │
+│           - Detailed skill instructions in context                         │
+│           - Access to tools (search_music, control_music_player, etc.)    │
+│           - Can now make informed tool calls                               │
+│                                                                              │
+│ Caching:  NONE - bodies read from disk each time (memory efficient)       │
+│           Metadata (name, description) cached in memory                    │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 6. ENVIRONMENT VARIABLES                                                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ AGENT_SKILLS_DIR                                                           │
+│   Default: ./skills                                                        │
+│   Format:  Colon-separated paths (multiple skill directories)              │
+│   Example: export AGENT_SKILLS_DIR="/home/user/skills:/etc/skills"        │
+│   When:    Evaluated at OpenAIAgentRuntime constructor                     │
+│                                                                              │
+│ Load Order:                                                                 │
+│   Skills discovered in order specified by AGENT_SKILLS_DIR                │
+│   First skill with same name wins (allows overrides)                       │
+│   Example: Project skills override global skills if listed first           │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 7. SKILL METADATA FORMAT (SKILL.md frontmatter)                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Required Fields (exactly 2):                                               │
+│                                                                              │
+│   name: <string>                                                           │
+│   - Unique skill identifier                                               │
+│   - Must match directory name (e.g., skills/music/ → name: music)        │
+│   - Used to look up skill with load_skill tool                           │
+│   - Case-insensitive matching when loading                               │
+│                                                                              │
+│   description: <string>                                                    │
+│   - One-sentence description for LLM decision-making                       │
+│   - Example: "处理'放/来首/想听/...'等点歌与音乐控制请求"                  │
+│   - Appears in 【可用技能】 section of system prompt                      │
+│   - Helps LLM decide when to call load_skill                             │
+│                                                                              │
+│ Format Rules:                                                              │
+│   - YAML syntax (simple key: value format)                                │
+│   - Enclosed by --- delimiters                                            │
+│   - No third-party parser (custom simple parser used)                     │
+│   - Values can be quoted: name: "my-skill" or name: my-skill              │
+│   - Comments allowed (lines starting with #)                              │
+│                                                                              │
+│ Example:                                                                   │
+│   ---                                                                       │
+│   name: music                                                              │
+│   description: 处理点歌与音乐控制请求                                      │
+│   ---                                                                       │
+│                                                                              │
+│ Body (Markdown):                                                           │
+│   Everything after the closing --- is treated as skill instructions        │
+│   Can include:                                                             │
+│   - Tool mappings                                                          │
+│   - Decision paths / logic tables                                          │
+│   - Implementation guidelines                                              │
+│   - Examples                                                               │
+│   - References to helper files in skill directory                          │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 8. IMPORTANT TIMING CONSTRAINTS                                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Startup (T=0):                                                             │
+│   ✓ Skills discovered via discoverSkills() (ONE-TIME ONLY)                │
+│   ✓ Metadata cached in memory                                             │
+│   ✓ System prompt built with skill list                                   │
+│   ✓ Agent ready                                                            │
+│                                                                              │
+│ Runtime (T>0):                                                             │
+│   ✓ Skill descriptions available to LLM in system prompt                  │
+│   ✓ LLM can call load_skill() to fetch full instructions                  │
+│   ✓ SKILL.md body read from disk on-demand                                │
+│   ✗ New SKILL.md files NOT discovered (no hot-reload)                     │
+│   ✗ Edits to SKILL.md NOT reflected (stale reads possible)                │
+│                                                                              │
+│ How to Reload:                                                             │
+│   → Restart the agent/application                                         │
+│   → Triggers new OpenAIAgentRuntime() constructor                         │
+│   → Calls discoverSkills() again                                          │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 9. LOGGING & DEBUGGING                                                      │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Discovery Logs:                                                            │
+│   skills.discover.done                 - Lists all discovered skills      │
+│   skills.discover.missing_frontmatter  - SKILL.md missing name/description│
+│   skills.discover.duplicate_skipped    - Duplicate skill name             │
+│   skills.discover.read_dir_failed      - Cannot read skills/ directory    │
+│   skills.discover.read_file_failed     - Cannot read SKILL.md             │
+│                                                                              │
+│ Runtime Logs:                                                              │
+│   agent.run.start/end                  - Agent execution lifecycle        │
+│   (load_skill calls logged in agent trace)                                │
+│                                                                              │
+│ Debug Tips:                                                                │
+│   1. Check that skills/ exists and SKILL.md files present                 │
+│   2. Verify frontmatter has exactly "name:" and "description:" lines      │
+│   3. Look for "skills.discover.done" log to confirm discovery             │
+│   4. Ensure skill name matches lowercase: search_music vs load_skill()    │
+│   5. Restart app after adding/editing SKILL.md files                      │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ 10. COMMON MISTAKES & GOTCHAS                                               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ ❌ Adding SKILL.md without restarting                                      │
+│    → New skills won't be discovered                                        │
+│    ✓ Fix: Restart the application                                         │
+│                                                                              │
+│ ❌ Typo in frontmatter field names                                         │
+│    → Example: "skill_name:" instead of "name:"                            │
+│    → Example: "desc:" instead of "description:"                           │
+│    ✓ Fix: Check log "skills.discover.missing_frontmatter"                 │
+│                                                                              │
+│ ❌ Directory name doesn't match skill name                                 │
+│    → Example: skills/music-player/ with name: music inside               │
+│    ✓ Fix: Make directory name = skill name (usually)                      │
+│           or update name: field to match                                    │
+│                                                                              │
+│ ❌ Editing SKILL.md and expecting changes without restart                  │
+│    → Metadata re-scanned at startup only                                  │
+│    → Bodies read fresh from disk on load_skill call (this one works)     │
+│    ✓ Fix: Restart agent to update metadata                                │
+│           Body edits work at runtime (skill must be loaded first)          │
+│                                                                              │
+│ ❌ LLM not calling load_skill even though skill is needed                 │
+│    → Check that skill description is in system prompt                     │
+│    → Description might be too unclear/specific                            │
+│    ✓ Fix: Review description, consider making it more general             │
+│           Add a comment in SKILL.md asking LLM to load it                │
+│                                                                              │
+│ ❌ Case sensitivity issues with skill names                                │
+│    → load_skill matching is case-insensitive (normalized)                │
+│    ✓ Usually not an issue, but be consistent in descriptions              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+

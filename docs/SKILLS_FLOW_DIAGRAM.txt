@@ -1,0 +1,279 @@
+═════════════════════════════════════════════════════════════════════════════════
+                         SKILL LOADING FLOW DIAGRAM
+═════════════════════════════════════════════════════════════════════════════════
+
+STARTUP / INITIALIZATION PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ┌─ CLI / Application Entry Point
+    │
+    ▼
+ new OpenAIAgentRuntime(config)
+    │
+    ├─ Line 72-82: Constructor
+    │  └─ this.skills = discoverSkills()
+    │
+    ▼
+ discoverSkills()  [src/agent/skills/skill-loader.ts]
+    │
+    ├─ Read from:
+    │  ├─ $AGENT_SKILLS_DIR (env var, colon-separated)
+    │  └─ default: ./skills/
+    │
+    ├─ For each directory entry:
+    │  ├─ Check if directory
+    │  ├─ Look for SKILL.md
+    │  └─ readFileSync(SKILL.md)
+    │
+    ├─ parseFrontmatter(content)  [Line 53]
+    │  ├─ Extract YAML frontmatter (name, description)
+    │  └─ Skip body content (loaded on-demand later)
+    │
+    └─ Return SkillMeta[]
+       └─ [
+            { name: "music", description: "...", directory: "skills/music", file: "..." },
+            { name: "reminder", description: "...", ... },
+            { name: "air-conditioner", description: "...", ... },
+            { name: "game", description: "...", ... }
+          ]
+
+    ▼
+ buildInstructions()  [Line 144]
+    │
+    ├─ const section = buildSkillsPromptSection(this.skills)  [Line 194]
+    │  │
+    │  └─ Format:
+    │     【可用技能】
+    │     当用户请求匹配下列某个技能的描述时，先调用 load_skill 工具...
+    │
+    │     - music: 处理"放/来首/..."等点歌与音乐控制请求
+    │     - reminder: 处理"提醒我..."、"到点喊我..."类请求
+    │     - air-conditioner: 处理空调相关控制
+    │     - game: 处理小朋友想玩游戏机...
+    │
+    └─ return `${BASE_INSTRUCTIONS}\n\n${section}`
+
+    ▼
+ new Agent({
+    name: "Home Voice Assistant",
+    model: config.openaiAgentModel,
+    instructions: fullInstructions,    ◄─ Contains skill list now
+    tools: [
+      controlDeviceTool,
+      ...,
+      createLoadSkillTool(this.skills), ◄─ Can call load_skill
+      ...
+    ]
+ })
+
+    ▼
+ Ready to accept user requests
+
+
+RUNTIME / CONVERSATION PHASE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ┌─ User Input
+    │ (e.g., "放一首周杰伦的稻香")
+    │
+    ▼
+ runtime.run(input)
+    │
+    ├─ Prepare turnInput = [...history, { role: "user", content: input.text }]
+    │
+    └─ runner.run(agent, turnInput, { context, maxTurns: 500 })
+
+    ▼
+ LLM Processes Request
+    │
+    ├─ Reads system instructions (contains 【可用技能】 section)
+    │
+    ├─ Analyzes user intent against skill descriptions
+    │ └─ LLM thinks: "The user said '放一首周杰伦的稻香' → this is music skill territory"
+    │
+    └─ Decides to call load_skill("music") to get detailed rules
+
+    ▼
+ LLM calls load_skill tool
+    │
+    ├─ Tool name: "load_skill"
+    ├─ Parameters: { name: "music" }
+    │
+    └─ Handler: createLoadSkillTool callback [src/agent/tools/load-skill.tool.ts]
+
+    ▼
+ createLoadSkillTool callback executes
+    │
+    ├─ Call: loadSkillBody(skills, "music")  [Line 163 in skill-loader.ts]
+    │  │
+    │  ├─ Find target = skills.find(s => s.name.toLowerCase() === "music")
+    │  │ └─ Found: { name: "music", directory: "skills/music", file: "skills/music/SKILL.md", ... }
+    │  │
+    │  ├─ readFileSync("skills/music/SKILL.md")
+    │  │
+    │  ├─ parseFrontmatter(raw)  [Line 178]
+    │  │ └─ Extract body only (frontmatter removed)
+    │  │
+    │  └─ Return: {
+    │        ok: true,
+    │        name: "music",
+    │        directory: "skills/music",
+    │        body: "# 音乐 Skill\n\n对应工具:\n- search_music: ..."
+    │     }
+    │
+    └─ Tool returns result to LLM
+
+    ▼
+ LLM reads detailed skill instructions
+    │
+    ├─ Now sees full SKILL.md body:
+    │  ├─ Tool mappings (search_music, control_music_player)
+    │  ├─ Decision paths for different user inputs
+    │  ├─ Example sequences:
+    │  │  - "播放周杰伦的稻香" → search_music(...) → play_track(...)
+    │  │  - "来点轻音乐" → search_music(..., type='playlist') → play_playlist(...)
+    │
+    └─ Now has both: skill rules + access to tools
+
+    ▼
+ LLM Executes
+    │
+    ├─ Calls: search_music(query="稻香", artist="周杰伦", type="track", ...)
+    ├─ Receives: [{ id, title, artist, ... }, ...]
+    ├─ Calls: control_music_player(action="play_track", encrypted_id=..., ...)
+    ├─ Receives: { ok: true, status: "playing" }
+    │
+    └─ Synthesizes response: "为您播放周杰伦的稻香"
+
+    ▼
+ Response returned to user
+
+
+FILE DISCOVERY SCAN TREE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+skills/
+├── music/
+│   └── SKILL.md
+│       ├─── Frontmatter (scanned at startup)
+│       │    name: music
+│       │    description: 处理"放/来首/..."等点歌与音乐控制请求
+│       │
+│       └─── Body (loaded on-demand via load_skill)
+│            # 音乐 Skill
+│            ## 决策路径
+│            ...
+│
+├── reminder/
+│   └── SKILL.md (same structure)
+│
+├── air-conditioner/
+│   └── SKILL.md (same structure)
+│
+└── game/
+    └── SKILL.md (same structure)
+
+
+KEY TIMING MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ T=0 (App Start)                                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│ - discoverSkills() runs once                                         │
+│ - Reads all SKILL.md frontmatter (fast, minimal I/O)                │
+│ - SkillMeta[] collected in memory                                    │
+│ - buildSkillsPromptSection() formats skill list                      │
+│ - Agent created with full instructions                               │
+│ - App ready to receive requests                                      │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ T=X (During Conversation Turn)                                       │
+├──────────────────────────────────────────────────────────────────────┤
+│ - User sends message                                                 │
+│ - LLM analyzes against skill descriptions (in-memory, instant)       │
+│ - LLM decides: "Need load_skill('music')"                            │
+│ - Tool callback reads SKILL.md body (single file I/O)                │
+│ - LLM receives full instructions                                     │
+│ - LLM calls domain-specific tools                                    │
+│ - Response synthesized & returned                                    │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ T=Y (App Restart / Reload)                                          │
+├──────────────────────────────────────────────────────────────────────┤
+│ - NO hot-reload of skills                                           │
+│ - New SKILL.md files NOT detected during runtime                     │
+│ - Must restart app for new skills to be discovered                   │
+│ - Existing SKILL.md edits: changes only take effect on restart      │
+└──────────────────────────────────────────────────────────────────────┘
+
+
+MEMORY & CONTEXT USAGE PATTERN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+System Prompt at Runtime:
+┌─────────────────────────────────────────────────────┐
+│ BASE_INSTRUCTIONS (fixed)                           │
+│ - Output format rules                              │
+│ - Tool usage guidelines                             │
+│ - ~100 tokens                                       │
+└─────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────┐
+│ 【可用技能】 (dynamic, from buildSkillsPromptSection)│
+│ - music: 处理点歌...                                 │
+│ - reminder: 处理提醒...                             │
+│ - air-conditioner: 处理空调...                      │
+│ - game: 处理游戏...                                 │
+│ ~50 tokens (all 4 skills)                          │
+└─────────────────────────────────────────────────────┘
+        ↓
+    = Full System Prompt (~150 tokens, minimal)
+
+User Request Turn:
+┌─────────────────────────────────────────────────────┐
+│ LLM reads skill list, judges if load_skill needed  │
+│ IF LLM calls load_skill("music"):                   │
+│   ├─ Receives full SKILL.md body                   │
+│   └─ ~500-1000 tokens for detailed rules           │
+│                                                     │
+│ ELSE: keeps context minimal                        │
+│   └─ Continues without skill details               │
+└─────────────────────────────────────────────────────┘
+
+Result: Token efficiency through progressive disclosure
+- No unnecessary context inflation
+- Scales better with more skills
+- Rules only loaded when relevant
+
+
+DATA STRUCTURES IN MEMORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OpenAIAgentRuntime instance:
+┌────────────────────────────────┐
+│ agent: Agent<VoiceAgentContext>│
+├────────────────────────────────┤
+│ skills: SkillMeta[]            │  ◄─ Discovered at startup
+│ [                              │      Persists for lifetime of runtime
+│   {                            │
+│     name: "music",             │
+│     description: "...",        │
+│     directory: "skills/music", │
+│     file: "skills/music/SKILL" │
+│   },                           │
+│   { ... }                      │
+│ ]                              │
+│                                │
+│ runner: Runner                 │
+│ history: AgentInputItem[]      │
+│ langfuseTracer?: ...           │
+└────────────────────────────────┘
+
+No skill content cached in memory (except frontmatter metadata)
+- Minimizes startup memory footprint
+- SKILL.md bodies read fresh from disk each time load_skill is called
+
+═════════════════════════════════════════════════════════════════════════════════

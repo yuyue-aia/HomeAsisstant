@@ -24,6 +24,15 @@ export interface AppConfig {
 
   homeAssistantBaseUrl?: string;
   homeAssistantToken?: string;
+
+  /**
+   * Skill 加载模式：
+   * - 'eager'（默认）：启动时把所有 SKILL.md 正文一次性内联进 system prompt，
+   *   省掉 LLM 调用 load_skill 的额外往返，语音对话首字延迟更低；
+   * - 'lazy'：保留 load_skill 工具，由 LLM 按需读取 SKILL.md。token 占用更少，
+   *   但每次匹配 skill 多一轮 LLM 推理。
+   */
+  agentSkillsLoadMode: 'eager' | 'lazy';
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -65,6 +74,10 @@ export function loadConfig(): AppConfig {
 
     homeAssistantBaseUrl: process.env.HOME_ASSISTANT_BASE_URL,
     homeAssistantToken: process.env.HOME_ASSISTANT_TOKEN,
+
+    // 仅认 'lazy' 显式开关；其他值（含未设置/拼错）一律按默认 eager 走，避免线上无声降级。
+    agentSkillsLoadMode:
+      (process.env.AGENT_SKILLS_LOAD_MODE ?? '').toLowerCase() === 'lazy' ? 'lazy' : 'eager',
   };
 }
 
