@@ -19,6 +19,7 @@
   - Gosund / 米家智能插板（`cuco.plug.cp5d`）—— 多孔位独立开关
   - Home Assistant REST API —— 通用设备透传
   - 游戏机限时管理（接在插板某一孔的 Switch，按周次/单日额度配额）
+  - 凌晨自动充电（默认每天 03:00–05:00 给游戏机插孔通断电，纯后台、不打扰）
   - 提醒 / 闹钟（自然语言时间解析 + 重复规则 + 自动提前量）
   - 网易云音乐（基于 `ncm-cli` 的 mpv daemon）
   - 联网搜索（DuckDuckGo / Brave / Tavily / SerpAPI / Bing 自适配）
@@ -187,6 +188,69 @@ description: 一句话说"用户什么时候应该让你介入"，给 LLM 决定
 
 ---
 
+## 凌晨自动充电（默认开启）
+
+`AutoChargeScheduler`（`src/services/auto-charge-scheduler.ts`）每天定时给游戏机所在的插板孔位通电、断电——既保证 Switch 之类设备总有电，又不长期满载红着指示灯。
+
+### 默认行为
+
+- **窗口**：本地时区每天 `03:00` → `05:00`，可改 `AUTO_CHARGE_START` / `AUTO_CHARGE_END`
+- **设备**：复用 `GAME_CONSOLE_PLUG_DID`（默认 `s1`）那一孔
+- **静默**：凌晨**不**走 TTS 播报，只写结构化日志（`auto-charge.*`）；不和 LLM 交互，不注册任何 Agent 工具
+- **未配置自动禁用**：`GOSUND_PLUG_IP` / `GOSUND_PLUG_TOKEN` 缺一项 → scheduler 启动时打一行 `auto-charge.scheduler.disabled` 后退出，不报错
+- **关闭方式**：`AUTO_CHARGE_ENABLED=0`（认 `0/false/off/no`，其他值含拼错都算开启）
+
+### 调度策略
+
+`on` 与 `off` 用两条**独立**的 `setTimeout` 链各自调度到下一个目标时刻——不依赖 `on` 触发后再排 `off`。这样进程在 03:30 崩溃重启时 `off` 仍能从持久化状态正确恢复。
+
+### 触发逻辑
+
+- **on** 触发时若 `GameConsoleController.hasActiveSession()` 为真（小孩还在玩），跳过本次通电，写 `auto-charge.skip.active_session` warn，不抢小孩会话。
+- **off** 不看 active session（凌晨 5 点该关就关），失败带最多 **5 次 × 1 分钟间隔** 重试，仍失败写 `auto-charge.power_off_failed`。
+
+### 启动恢复
+
+进程启动时 `recover()` 按当前时刻分三档处理（`OFF_RECOVER_GRACE_MS = 10 min`）：
+
+| 启动时位置 | 行为 |
+|---|---|
+| 在 `[start, end)` 窗口内，且今天还没开过电 | 立即补 `on`；`off` 定时器照常排到 `end` |
+| 刚错过 `end` ≤ 10 分钟，且今天还没关过电 | 立即补 `off` |
+| 错过窗口已超 grace | 仅写 `auto-charge.recover.missed_window` warn，**不**主动操作设备（白天用户可能自己开过插板，不能误关） |
+
+### 状态持久化
+
+`.runtime/auto-charge-state.json`，记录 `lastOnIso / lastOffIso / lastStatus`，写盘 tmp+rename 原子替换 + 串行 chain，损坏自动备份成 `.bad-<ts>.json`（与 `reminder-service` 同构）。
+
+### 关键日志
+
+按需 `grep auto-charge` 排查：
+
+```
+auto-charge.scheduler.start          # 启动，含下次 on/off ISO
+auto-charge.scheduler.disabled       # 未启用 / 插板未配置
+auto-charge.power_on                 # 03:00 触发
+auto-charge.power_off                # 05:00 触发，含 attempts
+auto-charge.skip.active_session      # 03:00 时小孩还在玩，跳过
+auto-charge.power_off_attempt_failed # 单次重试失败
+auto-charge.recover.late_on/off      # 启动时补开/补关
+auto-charge.recover.missed_window    # 启动时已错过且超 grace
+auto-charge.state.*                  # 持久化读写
+```
+
+### 临时验证
+
+```bash
+# 假设当前 14:30，跑一个 3 分钟窗口端到端验证
+AUTO_CHARGE_START=14:32 AUTO_CHARGE_END=14:35 npm run start
+# 看日志：scheduler.start → power_on (14:32) → power_off (14:35)
+```
+
+崩溃恢复：在窗口内 `Ctrl+C` 强退立刻重启，应看到 `recover.in_window_already_on`，off 定时器仍排到 14:35。
+
+---
+
 ## 配置参考（`.env`）
 
 完整列表见 [`.env.example`](./.env.example)。下面只列最常被改的几项。
@@ -202,6 +266,10 @@ description: 一句话说"用户什么时候应该让你介入"，给 LLM 决定
 | `AGENT_SKILLS_DIR` | `skills` | 多目录用 `:` 分隔，先发现的优先 |
 | `TTS_STREAMING` | `false` | 设 `true` 走 WebSocket 流式 TTS（需控制台开通"实时语音合成"） |
 | `KWS_KEYWORDS_FILE` | `models/kws/keywords-caibao.txt` | 切换唤醒词 |
+| `AUTO_CHARGE_ENABLED` | `1` | 凌晨自动充电总开关，显式 `0/false/off/no` 关闭，其他值（含未设置）为开启 |
+| `AUTO_CHARGE_START` | `03:00` | 通电时刻，本地时区 HH:mm，格式不对启动直接报错 |
+| `AUTO_CHARGE_END` | `05:00` | 断电时刻，必须 > `AUTO_CHARGE_START`（不支持跨午夜窗口） |
+| `AUTO_CHARGE_STATE_FILE` | `.runtime/auto-charge-state.json` | 上一次 on/off 时刻持久化路径，重启恢复用 |
 | `WAKE_DIAG` | — | `=1` 时启用麦克风滚动录音诊断（`kill -USR2 <pid>` 触发 dump） |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | — | 三项配齐即开启 trace 上报 |
 

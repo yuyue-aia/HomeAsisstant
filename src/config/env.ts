@@ -33,6 +33,18 @@ export interface AppConfig {
    *   但每次匹配 skill 多一轮 LLM 推理。
    */
   agentSkillsLoadMode: 'eager' | 'lazy';
+
+  /**
+   * 凌晨自动给游戏机充电（默认开启）：
+   * - 每天 startHHmm 通电、endHHmm 断电，本地时区；
+   * - 静默执行，凌晨不走 TTS 播报，只写结构化日志；
+   * - 插板未配置 / 时间窗口与小孩游戏会话冲突 → 自动跳过当次；
+   * - 设置 AUTO_CHARGE_ENABLED=0|false|off 可整体关闭。
+   */
+  autoChargeEnabled: boolean;
+  autoChargeStartHHmm: string;
+  autoChargeEndHHmm: string;
+  autoChargeStateFile: string;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -45,6 +57,33 @@ function intEnv(name: string, fallback: number): number {
 function strEnv(name: string, fallback: string): string {
   const raw = process.env[name];
   return raw && raw.trim() ? raw : fallback;
+}
+
+/**
+ * 解析 "HH:mm" 字符串。错误格式直接抛 —— 走"配置错误快失败"风格，
+ * 避免线上把 "25:00" / "aa:bb" 静默吞掉。
+ */
+function parseHHmm(name: string, raw: string): string {
+  const m = raw.trim().match(/^([0-2]\d):([0-5]\d)$/);
+  if (!m) {
+    throw new Error(`Invalid ${name}="${raw}", expected HH:mm`);
+  }
+  const h = Number(m[1]);
+  if (h > 23) throw new Error(`Invalid ${name}="${raw}", hour must be 00-23`);
+  return `${m[1]}:${m[2]}`;
+}
+
+/**
+ * 解析"开关"型环境变量：未设置 → 默认值；显式设 `0|false|off|no` → false；其他 → true。
+ * 仅识别 false 关键字，避免拼错时误关键功能（与 AGENT_SKILLS_LOAD_MODE 同一思路）。
+ */
+function boolEnv(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === '' ) return fallback;
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
 }
 
 export function loadConfig(): AppConfig {
@@ -78,6 +117,20 @@ export function loadConfig(): AppConfig {
     // 仅认 'lazy' 显式开关；其他值（含未设置/拼错）一律按默认 eager 走，避免线上无声降级。
     agentSkillsLoadMode:
       (process.env.AGENT_SKILLS_LOAD_MODE ?? '').toLowerCase() === 'lazy' ? 'lazy' : 'eager',
+
+    autoChargeEnabled: boolEnv('AUTO_CHARGE_ENABLED', true),
+    autoChargeStartHHmm: parseHHmm(
+      'AUTO_CHARGE_START',
+      strEnv('AUTO_CHARGE_START', '03:00'),
+    ),
+    autoChargeEndHHmm: parseHHmm(
+      'AUTO_CHARGE_END',
+      strEnv('AUTO_CHARGE_END', '05:00'),
+    ),
+    autoChargeStateFile: strEnv(
+      'AUTO_CHARGE_STATE_FILE',
+      '.runtime/auto-charge-state.json',
+    ),
   };
 }
 

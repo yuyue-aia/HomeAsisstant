@@ -192,6 +192,30 @@ export class GameConsoleController {
     }
   }
 
+  /**
+   * 暴露给"非小孩游戏会话"的纯设备开关入口（如凌晨自动充电）。
+   *
+   * 故意取名 force* 强调它绕过 quota / weekday / minutes / active session 校验：
+   * 调用方自己负责合法性。内部仍然只是 powerOn/Off 的薄壳，复用同一份网络/重试代码。
+   */
+  async forcePowerOn(): Promise<{ ok: boolean; error?: string }> {
+    return this.powerOn();
+  }
+
+  async forcePowerOff(): Promise<{ ok: boolean; error?: string }> {
+    return this.powerOff();
+  }
+
+  /** 给外部判断"是否有进行中的小孩游戏会话"——避免凌晨充电时误抢。 */
+  hasActiveSession(): boolean {
+    return this.quota.getActiveSession() !== null;
+  }
+
+  /** 设备是否配置（IP+token 都给齐了）；scheduler 启动前用它探测，未配置就静默禁用。 */
+  isPlugConfigured(): boolean {
+    return !!(this.cfg.plugIp && this.cfg.plugToken);
+  }
+
   /** 到期断电；带 1 次重试。失败时尝试主动播报。 */
   private async powerOffOnExpire(): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt += 1) {

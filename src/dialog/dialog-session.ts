@@ -7,6 +7,7 @@ import { TencentAsrClient, type AsrResult } from '../asr/tencent-asr-client';
 import { TencentTtsClient, splitForTts, StreamingSentenceSplitter } from '../tts/tencent-tts-client';
 import { OpenAIAgentRuntime } from '../agent/openai-agent-runtime';
 import { getGameConsoleController } from '../services/game-console-controller';
+import { getAutoChargeScheduler } from '../services/auto-charge-scheduler';
 import { getReminderService } from '../services/reminder-service';
 import { getMusicService } from '../services/music/music-service';
 import { DuckController } from '../services/music/duck-controller';
@@ -131,6 +132,22 @@ export class DialogSession extends EventEmitter {
       });
     }
 
+    // 凌晨自动充电：默认开启，纯后台跑，不接 announcer。
+    // start() 排好今天/明天的 on/off 定时器，再 recover() 处理"刚崩溃重启刚好在窗口里"的补开/补关。
+    try {
+      const sched = getAutoChargeScheduler();
+      sched.start();
+      void sched.recover().catch((error) => {
+        logger.warn('dialog.auto_charge.recover_failed', {
+          error: (error as Error).message,
+        });
+      });
+    } catch (error) {
+      logger.warn('dialog.auto_charge.bind_failed', {
+        error: (error as Error).message,
+      });
+    }
+
     // 音乐服务：触发 init（探测 ncm-cli 登录态、设默认音量），并挂上 duck 控制器，
     // 让对话状态变更自动 pause/resume 音乐（mac mini 无 AEC 必须 pause）。
     try {
@@ -241,6 +258,14 @@ export class DialogSession extends EventEmitter {
   dispose(): void {
     this.clearRecordingTimer();
     this.asr?.close();
+    // 进程退出前关掉凌晨充电的所有 setTimeout，避免事件循环被吊住。
+    try {
+      getAutoChargeScheduler().shutdown();
+    } catch (error) {
+      logger.warn('dialog.auto_charge.shutdown_failed', {
+        error: (error as Error).message,
+      });
+    }
     this.removeAllListeners();
   }
 
