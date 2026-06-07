@@ -46,6 +46,7 @@ function isAlive(pid: number): boolean {
 // ============================================================
 
 async function cmdStartForeground(): Promise<void> {
+  ensureBluetoothSpeaker();
   const service = new VoiceService();
   service.start();
 
@@ -87,6 +88,49 @@ async function cmdStartForeground(): Promise<void> {
     if (file) console.log(`[wake-diag] dumped: ${file}`);
     else console.log('[wake-diag] 未启用，请用 WAKE_DIAG=1 启动服务');
   });
+}
+
+/**
+ * 启动前确保蓝牙音箱已连接。需要环境变量：
+ *   BT_SPEAKER_MAC      目标设备 MAC（如 04-67-61-2d-c7-2d）
+ *   BT_BLUEUTIL_PATH    blueutil 可执行文件路径（默认 /usr/local/bin/blueutil）
+ * 没配 MAC 就跳过；找不到 blueutil 也跳过；不影响主流程。
+ */
+function ensureBluetoothSpeaker(): void {
+  const mac = (process.env.BT_SPEAKER_MAC || '').trim();
+  if (!mac) return;
+  const bt = (process.env.BT_BLUEUTIL_PATH || '/usr/local/bin/blueutil').trim();
+  if (!existsSync(bt)) {
+    console.warn(`[bt] blueutil not found at ${bt}, skip`);
+    return;
+  }
+  try {
+    // 1. 蓝牙没开就开
+    const power = spawnSync(bt, ['--power'], { encoding: 'utf8', timeout: 3000 });
+    if (power.stdout?.trim() !== '1') {
+      console.log('[bt] powering on bluetooth');
+      spawnSync(bt, ['--power', '1'], { timeout: 5000 });
+      // 等蓝牙栈起来
+      spawnSync('sleep', ['2']);
+    }
+    // 2. 已连上就直接返回
+    const isConn = spawnSync(bt, ['--is-connected', mac], { encoding: 'utf8', timeout: 3000 });
+    if (isConn.stdout?.trim() === '1') {
+      console.log(`[bt] ${mac} already connected`);
+      return;
+    }
+    // 3. 尝试连接（最多 10s）
+    console.log(`[bt] connecting to ${mac} ...`);
+    const r = spawnSync(bt, ['--connect', mac], { encoding: 'utf8', timeout: 10000 });
+    const check = spawnSync(bt, ['--is-connected', mac], { encoding: 'utf8', timeout: 3000 });
+    if (check.stdout?.trim() === '1') {
+      console.log(`[bt] connected ${mac}`);
+    } else {
+      console.warn(`[bt] connect failed: ${r.stderr?.trim() || r.stdout?.trim() || 'unknown'}`);
+    }
+  } catch (error) {
+    console.warn(`[bt] error: ${(error as Error).message}`);
+  }
 }
 
 /**
