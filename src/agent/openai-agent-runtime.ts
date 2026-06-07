@@ -58,11 +58,19 @@ export class OpenAIAgentRuntime {
    * - 内存里以 result.history 为准（含 system / user / assistant / tool_call / tool_result）；
    * - 每轮 run 完成后异步写入当天对应的 history 文件，进程重启后只从当天文件恢复；
    * - 历史按天分片存储（YYYY-MM-DD.json），加载时仅读当天分片，跨天自动失忆；
-   * - 通过 OPENAI_AGENT_HISTORY_MAX 控制单日条数上限，避免文件无限增长。
+   * - 通过 OPENAI_AGENT_HISTORY_MAX 控制单日条数上限，避免文件无限增长；
+   * - 通过 OPENAI_AGENT_HISTORY_MAX_AGE_MS 控制单条最大年龄（默认 1 小时），
+   *   加载时过滤过期条目，避免重启后把几小时前的旧对话当上下文。
+   *
+   * 落盘格式（新）：[{ ts: number, item: AgentInputItem }, ...]
+   * 兼容旧格式：[AgentInputItem, ...]（无 ts，按"刚刚发生"处理，下次落盘自动升级）。
    */
   private history: AgentInputItem[] = [];
+  /** 与 this.history 等长的时间戳数组，下标对齐。 */
+  private historyTs: number[] = [];
   private readonly historyDir: string;
   private readonly historyMaxItems: number;
+  private readonly historyMaxAgeMs: number;
   private historyWriteChain: Promise<void> = Promise.resolve();
   private readonly langfuseTracer?: LangfuseTracingProcessor;
   /** 启动时一次性扫描的 skill 元数据列表（不含正文，正文按需 load_skill 加载）。 */
@@ -81,6 +89,12 @@ export class OpenAIAgentRuntime {
       0,
       Number(process.env.OPENAI_AGENT_HISTORY_MAX) || 20,
     );
+    // 默认 1 小时；设为 0 表示不按时间过滤。
+    {
+      const raw = process.env.OPENAI_AGENT_HISTORY_MAX_AGE_MS;
+      const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
+      this.historyMaxAgeMs = Number.isFinite(parsed) && parsed >= 0 ? parsed : 60 * 60 * 1000;
+    }
     this.history = this.loadHistoryFromDisk();
     this.skills = discoverSkills();
     // Eager 模式启动时一次性把 SKILL.md 正文全部读到内存：
@@ -163,6 +177,7 @@ export class OpenAIAgentRuntime {
   }
 
   async run(input: RunVoiceAgentInput): Promise<RunVoiceAgentOutput> {
+    this.pruneHistoryByAge();
     logger.info('agent.run.start', {
       sessionId: input.sessionId,
       textLength: input.text.length,
@@ -213,6 +228,7 @@ export class OpenAIAgentRuntime {
     onTextDelta: (delta: string) => void,
   ): Promise<RunVoiceAgentOutput> {
     const startedAt = Date.now();
+    this.pruneHistoryByAge();
     logger.info('agent.runStream.start', {
       sessionId: input.sessionId,
       textLength: input.text.length,
@@ -318,14 +334,26 @@ export class OpenAIAgentRuntime {
     // SDK 的 result.history = input + newItems。
     // chat_completions 模式 + 部分第三方网关下，SDK 仅返回本轮 newItems（不带 input），
     // 这里兜底拼接，保证多轮上下文不丢。
+    const prevLen = this.history.length;
     if (sdkHistory.length >= turnInput.length) {
       this.history = sdkHistory;
     } else {
       this.history = [...turnInput, ...sdkHistory];
     }
 
+    // 重建 historyTs：旧条目沿用原 ts（按下标对齐，仅前 prevLen 个），
+    // 其余视为"本轮新增"，统一打 now。
+    const now = Date.now();
+    const nextTs: number[] = new Array(this.history.length);
+    for (let i = 0; i < this.history.length; i += 1) {
+      nextTs[i] = i < prevLen && this.historyTs[i] !== undefined ? this.historyTs[i] : now;
+    }
+    this.historyTs = nextTs;
+
     if (this.historyMaxItems > 0 && this.history.length > this.historyMaxItems) {
-      this.history = this.history.slice(this.history.length - this.historyMaxItems);
+      const cut = this.history.length - this.historyMaxItems;
+      this.history = this.history.slice(cut);
+      this.historyTs = this.historyTs.slice(cut);
     }
 
     this.scheduleHistoryFlush();
@@ -336,9 +364,38 @@ export class OpenAIAgentRuntime {
     return this.history.length;
   }
 
+  /**
+   * 按 historyMaxAgeMs 裁掉过老的内存历史（保持 history / historyTs 同步）。
+   * 在每次 run 入口调用一次，确保长进程跑几小时后旧消息不会一直跟着喂给 LLM。
+   * historyMaxAgeMs <= 0 时为关闭时间过滤，直接 no-op。
+   */
+  private pruneHistoryByAge(): void {
+    if (this.historyMaxAgeMs <= 0) return;
+    if (this.history.length === 0) return;
+    const cutoff = Date.now() - this.historyMaxAgeMs;
+    // ts 单调或近似单调（按写入顺序），找第一个未过期的下标即可。
+    let firstKeep = 0;
+    while (
+      firstKeep < this.historyTs.length &&
+      (this.historyTs[firstKeep] ?? 0) <= cutoff
+    ) {
+      firstKeep += 1;
+    }
+    if (firstKeep === 0) return;
+    const dropped = firstKeep;
+    this.history = this.history.slice(firstKeep);
+    this.historyTs = this.historyTs.slice(firstKeep);
+    logger.info('agent.history.pruned_by_age', {
+      dropped,
+      remaining: this.history.length,
+      maxAgeMs: this.historyMaxAgeMs,
+    });
+  }
+
   /** 仅在确有需要时手动清空历史（同时删除磁盘文件内容）。 */
   resetHistory(): void {
     this.history = [];
+    this.historyTs = [];
     this.scheduleHistoryFlush();
   }
 
@@ -386,18 +443,48 @@ export class OpenAIAgentRuntime {
       if (!raw.trim()) return [];
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
-      // 启动时也按 historyMaxItems 截断，避免历史文件意外膨胀导致首轮上下文爆掉。
-      const truncated =
-        this.historyMaxItems > 0 && parsed.length > this.historyMaxItems
-          ? parsed.slice(parsed.length - this.historyMaxItems)
-          : parsed;
+
+      // 兼容两种格式：
+      //  新：[{ ts: number, item: AgentInputItem }, ...]
+      //  旧：[AgentInputItem, ...]（无 ts，按 0 处理，即"远古"，会被时间过滤掉）
+      const now = Date.now();
+      const entries: Array<{ ts: number; item: AgentInputItem }> = parsed.map((entry) => {
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          'item' in entry &&
+          typeof (entry as { ts?: unknown }).ts === 'number'
+        ) {
+          return entry as { ts: number; item: AgentInputItem };
+        }
+        // 旧格式：没有时间戳，给 0，让 maxAge 过滤把它清掉（如果开启时间过滤）。
+        return { ts: 0, item: entry as AgentInputItem };
+      });
+
+      // 1) 按时间过滤
+      const ageFiltered =
+        this.historyMaxAgeMs > 0
+          ? entries.filter((e) => e.ts > 0 && now - e.ts <= this.historyMaxAgeMs)
+          : entries;
+
+      // 2) 按条数截断
+      const sizeFiltered =
+        this.historyMaxItems > 0 && ageFiltered.length > this.historyMaxItems
+          ? ageFiltered.slice(ageFiltered.length - this.historyMaxItems)
+          : ageFiltered;
+
+      this.historyTs = sizeFiltered.map((e) => e.ts);
+      const items = sizeFiltered.map((e) => e.item);
+
       logger.info('agent.history.loaded', {
         file,
-        items: truncated.length,
+        items: items.length,
         rawItems: parsed.length,
-        truncated: truncated.length !== parsed.length,
+        droppedByAge: entries.length - ageFiltered.length,
+        droppedBySize: ageFiltered.length - sizeFiltered.length,
+        maxAgeMs: this.historyMaxAgeMs,
       });
-      return truncated as AgentInputItem[];
+      return items;
     } catch (error) {
       logger.warn('agent.history.load_failed', {
         file,
@@ -418,12 +505,21 @@ export class OpenAIAgentRuntime {
    *
    * 代价：进程重启后 LLM 不知道之前调过哪些工具，强连续场景（如刚启动的定时器）
    * 会失忆。可接受，因为多数家庭语音对话是独立轮次。
+   *
+   * 返回 [item, ts] 对，保持与 historyTs 的对齐关系。
    */
-  private filterHistoryForDisk(items: AgentInputItem[]): AgentInputItem[] {
-    return items.filter((item) => {
-      const role = (item as { role?: string }).role;
-      return role === 'system' || role === 'user' || role === 'assistant';
-    });
+  private filterHistoryForDisk(
+    items: AgentInputItem[],
+    tsArr: number[],
+  ): Array<{ ts: number; item: AgentInputItem }> {
+    const out: Array<{ ts: number; item: AgentInputItem }> = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const role = (items[i] as { role?: string }).role;
+      if (role === 'system' || role === 'user' || role === 'assistant') {
+        out.push({ ts: tsArr[i] ?? Date.now(), item: items[i] });
+      }
+    }
+    return out;
   }
 
   /**
@@ -432,9 +528,11 @@ export class OpenAIAgentRuntime {
    *
    * 落盘到当天分片文件（YYYY-MM-DD.json），跨天后老文件保留在磁盘上不删除，
    * 但下次启动只读当天的——等价于"自动失忆"昨天的对话。
+   *
+   * 落盘格式：[{ ts, item }, ...]，便于下次启动按时间过滤超龄历史。
    */
   private scheduleHistoryFlush(): void {
-    const snapshot = this.filterHistoryForDisk(this.history);
+    const snapshot = this.filterHistoryForDisk(this.history, this.historyTs);
     const file = this.getTodayHistoryFile();
     this.historyWriteChain = this.historyWriteChain
       .catch(() => undefined)
