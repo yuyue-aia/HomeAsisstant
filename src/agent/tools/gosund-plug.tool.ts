@@ -1,14 +1,15 @@
 import { tool } from '@openai/agents';
 import { z } from 'zod';
 import { logger } from '../../common/logger';
-import { GosundPlug, SWITCH_SIID_BY_DID } from './gosund-plug-client';
+import { ResolvableGosundPlug, SWITCH_SIID_BY_DID } from './gosund-plug-client';
 import type { VoiceAgentContext } from '../types';
 
 /**
  * 控制 Gosund 插线板（cuco.plug.cp5d）的某一路开关。
  *
  * 配置（在 .env 中）：
- *   GOSUND_PLUG_IP    设备局域网 IP，例如 192.168.0.27
+ *   GOSUND_PLUG_MAC   设备 MAC（推荐，IP 变了也能自动重连）
+ *   GOSUND_PLUG_IP    设备局域网 IP（fallback / 首次启动用）
  *   GOSUND_PLUG_TOKEN 32 位 hex 设备 token
  */
 
@@ -38,6 +39,10 @@ function defaultIp(): string | undefined {
   return process.env.GOSUND_PLUG_IP?.trim() || undefined;
 }
 
+function defaultMac(): string | undefined {
+  return process.env.GOSUND_PLUG_MAC?.trim() || undefined;
+}
+
 function defaultToken(): string | undefined {
   return process.env.GOSUND_PLUG_TOKEN?.trim() || undefined;
 }
@@ -53,22 +58,23 @@ export const controlGosundPlugTool = tool<
   parameters: controlGosundPlugParameters,
   async execute({ did, action }) {
     const ip = defaultIp();
+    const mac = defaultMac();
     const token = defaultToken();
 
-    if (!ip || !token) {
+    if ((!ip && !mac) || !token) {
       return {
         ok: false,
         did,
         action,
-        message: '未配置插线板：请在 .env 中设置 GOSUND_PLUG_IP 和 GOSUND_PLUG_TOKEN。',
+        message: '未配置插线板：请在 .env 中设置 GOSUND_PLUG_MAC（或 GOSUND_PLUG_IP）和 GOSUND_PLUG_TOKEN。',
       };
     }
 
-    const plug = new GosundPlug(ip, token);
+    const plug = new ResolvableGosundPlug({ mac, fallbackIp: ip, token });
     try {
       if (action === 'status') {
         const on = await plug.status(did);
-        logger.info('tool.gosund_plug.status', { did, on });
+        logger.info('tool.gosund_plug.status', { did, on, ip: plug.getCurrentIp() });
         return {
           ok: true,
           did,
@@ -80,7 +86,7 @@ export const controlGosundPlugTool = tool<
 
       if (action === 'turn_on') {
         await plug.on(did);
-        logger.info('tool.gosund_plug.on', { did });
+        logger.info('tool.gosund_plug.on', { did, ip: plug.getCurrentIp() });
         return {
           ok: true,
           did,
@@ -92,7 +98,7 @@ export const controlGosundPlugTool = tool<
 
       if (action === 'turn_off') {
         await plug.off(did);
-        logger.info('tool.gosund_plug.off', { did });
+        logger.info('tool.gosund_plug.off', { did, ip: plug.getCurrentIp() });
         return {
           ok: true,
           did,
@@ -104,7 +110,7 @@ export const controlGosundPlugTool = tool<
 
       // toggle
       const next = await plug.toggle(did);
-      logger.info('tool.gosund_plug.toggle', { did, next });
+      logger.info('tool.gosund_plug.toggle', { did, next, ip: plug.getCurrentIp() });
       return {
         ok: true,
         did,

@@ -11,6 +11,11 @@
 
 import * as crypto from 'crypto';
 import * as dgram from 'dgram';
+import {
+  discoverIpByMac,
+  getCachedIpByMac,
+  invalidateCacheForMac,
+} from './gosund-plug-discovery';
 
 const MIIO_PORT = 54321;
 const HELLO_PACKET = Buffer.from(
@@ -280,5 +285,112 @@ export class GosundPlug {
 
   close(): void {
     this.session.close();
+  }
+}
+
+/**
+ * 创建一个对操作进行"按 MAC 重新发现 IP"包装的 GosundPlug 代理。
+ *
+ * 行为：
+ *  - 优先使用 cachedIp（来自 .runtime cache）→ 否则 fallbackIp（.env GOSUND_PLUG_IP）
+ *  - 若任一操作（status/on/off/toggle/statusAll）抛 timeout / network 异常，
+ *    会自动调用 discoverIpByMac() 找当前 IP 后重试一次
+ *  - 重发现成功后会写回 cache，下次直接命中
+ *
+ * 调用方仍然要在最后调用 .close() 释放 socket（与原 GosundPlug 一致）。
+ */
+export interface ResolvableGosundPlugOptions {
+  mac?: string;
+  fallbackIp?: string;
+  token: string;
+  timeoutMs?: number;
+}
+
+export class ResolvableGosundPlug {
+  private readonly mac?: string;
+  private readonly fallbackIp?: string;
+  private readonly token: string;
+  private readonly timeoutMs?: number;
+  private current: GosundPlug | null = null;
+  private currentIp: string | null = null;
+
+  constructor(opts: ResolvableGosundPlugOptions) {
+    this.mac = opts.mac;
+    this.fallbackIp = opts.fallbackIp;
+    this.token = opts.token;
+    this.timeoutMs = opts.timeoutMs;
+  }
+
+  private async resolveIp(): Promise<string | null> {
+    if (this.mac) {
+      const cached = await getCachedIpByMac(this.mac);
+      if (cached) return cached;
+    }
+    return this.fallbackIp ?? null;
+  }
+
+  private async ensurePlug(): Promise<GosundPlug> {
+    if (this.current) return this.current;
+    const ip = await this.resolveIp();
+    if (!ip) throw new Error('plug_ip_unresolved');
+    this.current = new GosundPlug(ip, this.token, { timeoutMs: this.timeoutMs });
+    this.currentIp = ip;
+    return this.current;
+  }
+
+  private dropPlug(): void {
+    if (this.current) {
+      try { this.current.close(); } catch { /* noop */ }
+    }
+    this.current = null;
+    this.currentIp = null;
+  }
+
+  /** 网络错误才需要重试；token 错 / 业务错不重试。 */
+  private isTransient(err: unknown): boolean {
+    const msg = (err as Error)?.message ?? '';
+    return /timeout|EHOSTUNREACH|ENETUNREACH|EHOSTDOWN|ECONNREFUSED|EAGAIN|ENETDOWN/i.test(msg);
+  }
+
+  private async withRetry<T>(fn: (plug: GosundPlug) => Promise<T>): Promise<T> {
+    try {
+      const plug = await this.ensurePlug();
+      return await fn(plug);
+    } catch (err) {
+      if (!this.mac || !this.isTransient(err)) throw err;
+      // 失败：让 cache 失效，重新广播发现
+      this.dropPlug();
+      await invalidateCacheForMac(this.mac);
+      const newIp = await discoverIpByMac(this.mac);
+      if (!newIp) throw new Error(`plug_offline (mac=${this.mac})`);
+      this.current = new GosundPlug(newIp, this.token, { timeoutMs: this.timeoutMs });
+      this.currentIp = newIp;
+      return await fn(this.current);
+    }
+  }
+
+  status(did: string = 'master'): Promise<boolean> {
+    return this.withRetry((p) => p.status(did));
+  }
+  on(did: string = 'master'): Promise<void> {
+    return this.withRetry((p) => p.on(did));
+  }
+  off(did: string = 'master'): Promise<void> {
+    return this.withRetry((p) => p.off(did));
+  }
+  toggle(did: string = 'master'): Promise<boolean> {
+    return this.withRetry((p) => p.toggle(did));
+  }
+  statusAll(): Promise<Record<string, boolean>> {
+    return this.withRetry((p) => p.statusAll());
+  }
+
+  /** 当前实际使用的 IP（调试日志用）。 */
+  getCurrentIp(): string | null {
+    return this.currentIp;
+  }
+
+  close(): void {
+    this.dropPlug();
   }
 }

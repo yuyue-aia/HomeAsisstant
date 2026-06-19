@@ -8,7 +8,7 @@
  */
 
 import { logger } from '../common/logger';
-import { GosundPlug, SWITCH_SIID_BY_DID } from '../agent/tools/gosund-plug-client';
+import { ResolvableGosundPlug, SWITCH_SIID_BY_DID } from '../agent/tools/gosund-plug-client';
 import {
   ActiveSession,
   CHILDREN,
@@ -24,6 +24,7 @@ type Announcer = (text: string) => void | Promise<void>;
 
 export interface GameConsoleConfig {
   plugIp?: string;
+  plugMac?: string;
   plugToken?: string;
   /** 默认 's1'，可通过 GAME_CONSOLE_PLUG_DID 覆盖 */
   plugDid: string;
@@ -66,6 +67,7 @@ function loadGameConsoleConfig(): GameConsoleConfig {
   }
   return {
     plugIp: process.env.GOSUND_PLUG_IP?.trim() || undefined,
+    plugMac: process.env.GOSUND_PLUG_MAC?.trim() || undefined,
     plugToken: process.env.GOSUND_PLUG_TOKEN?.trim() || undefined,
     plugDid: did,
     reminderSeconds,
@@ -161,9 +163,13 @@ export class GameConsoleController {
 
   // ---------------- 设备 ----------------
 
-  private getPlug(): GosundPlug | null {
-    if (!this.cfg.plugIp || !this.cfg.plugToken) return null;
-    return new GosundPlug(this.cfg.plugIp, this.cfg.plugToken);
+  private getPlug(): ResolvableGosundPlug | null {
+    if ((!this.cfg.plugIp && !this.cfg.plugMac) || !this.cfg.plugToken) return null;
+    return new ResolvableGosundPlug({
+      mac: this.cfg.plugMac,
+      fallbackIp: this.cfg.plugIp,
+      token: this.cfg.plugToken,
+    });
   }
 
   private async powerOn(): Promise<{ ok: boolean; error?: string }> {
@@ -211,9 +217,9 @@ export class GameConsoleController {
     return this.quota.getActiveSession() !== null;
   }
 
-  /** 设备是否配置（IP+token 都给齐了）；scheduler 启动前用它探测，未配置就静默禁用。 */
+  /** 设备是否配置（IP/MAC + token 都给齐了）；scheduler 启动前用它探测，未配置就静默禁用。 */
   isPlugConfigured(): boolean {
-    return !!(this.cfg.plugIp && this.cfg.plugToken);
+    return !!((this.cfg.plugIp || this.cfg.plugMac) && this.cfg.plugToken);
   }
 
   /** 到期断电；带 1 次重试。失败时尝试主动播报。 */
