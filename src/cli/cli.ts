@@ -52,14 +52,28 @@ async function cmdStartForeground(): Promise<void> {
 
   let shuttingDown = false;
   const shutdown = async (signal: string, exitCode = 0) => {
-    if (shuttingDown) return;
+    if (shuttingDown) {
+      // 已在优雅退出中又收到信号 → 用户不耐烦了，直接硬退
+      console.log(`\n再次收到 ${signal}，强制退出。`);
+      forceStopMusicSync();
+      process.exit(exitCode || 130);
+      return;
+    }
     shuttingDown = true;
-    console.log(`\n收到 ${signal}，正在退出…`);
+    console.log(`\n收到 ${signal}，正在退出…（再按一次直接强退）`);
+    // 总超时兜底：5s 还没清理完就硬退，避免被 tracing flush / 子进程 stop 卡死
+    const hardExitTimer = setTimeout(() => {
+      console.error('退出清理超时（5s），强制退出。');
+      forceStopMusicSync();
+      process.exit(exitCode || 1);
+    }, 5000);
+    hardExitTimer.unref();
     try {
       await service.stop();
     } catch (error) {
       console.error('退出时清理失败：', (error as Error).message);
     }
+    clearTimeout(hardExitTimer);
     // 双保险：service.stop 内部已 await 过音乐 stop（带 1.5s 超时），
     // 这里再同步发一次 `ncm-cli stop`，确保 mpv daemon 一定收到。
     forceStopMusicSync();
