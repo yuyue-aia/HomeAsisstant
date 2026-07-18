@@ -58,6 +58,8 @@ export class WebServer {
   private server: Server | null = null;
   /** 是否记录每个请求的访问日志（默认开，WEB_ACCESS_LOG=off 关闭）。 */
   private readonly accessLog: boolean;
+  /** 待消费的播报消息（最近一条），由 announcer 回调写入，被 status 接口读出后清空。 */
+  private pendingAnnounce: string | null = null;
 
   constructor(opts: WebServerOptions = loadWebServerOptions()) {
     this.opts = opts;
@@ -65,7 +67,15 @@ export class WebServer {
     this.configStore = new GameConfigStore();
     this.accessLog = (process.env.WEB_ACCESS_LOG || '').trim().toLowerCase() !== 'off';
     // 启动时把持久化配置应用到运行中的 controller，保证与语音链路一致。
-    getGameConsoleController().applyRuntimeConfig(this.configStore.get());
+    const ctrl = getGameConsoleController();
+    ctrl.applyRuntimeConfig(this.configStore.get());
+    // 将 Web 端播报注入 controller：写进 pendingAnnounce，由 /game/status 带出给前端。
+    // 注意：倒计时提醒（kind='reminder'）由前端 speakRemain 独立播报，这里不再转发，避免重复播两次。
+    ctrl.setAnnouncer((text, kind) => {
+      if (kind === 'reminder') return Promise.resolve();
+      this.pendingAnnounce = text;
+      return Promise.resolve();
+    });
   }
 
   start(): void {
@@ -309,7 +319,9 @@ export class WebServer {
     const active = status.active
       ? { ...status.active, avatar: metaById.get(status.active.child)?.avatar || 'star' }
       : null;
-    return { ...status, quotas, active, meId: me.id };
+    const announce = this.pendingAnnounce;
+    this.pendingAnnounce = null;
+    return { ...status, quotas, active, meId: me.id, reminderSeconds: this.configStore.get().reminderSeconds, announce };
   }
 
   /** 管理员查看全部记录；普通成员只能查看自己的记录。 */
@@ -333,6 +345,7 @@ export class WebServer {
     const result = await getGameConsoleController().start(me.id, Number(minutes), {
       label: me.displayName,
       activity: act,
+      testMode: me.role === 'test',
     });
     sendJson(res, result.ok ? 200 : 400, result);
   }

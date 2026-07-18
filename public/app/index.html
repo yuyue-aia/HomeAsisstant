@@ -660,6 +660,52 @@
       else renderRoute();
     }
 
+    // ---------- 倒计时语音提醒（管理员与玩家共用）----------
+    // _curSessionKey: 当前会话标识；_spokenPoints: 本次会话中已播报过的提醒点集合（去重）
+    var _curSessionKey = null;
+    var _spokenPoints = {};
+    var _voiceRemindPoints = [];
+    function setVoiceRemindPoints(points) {
+      _voiceRemindPoints = Array.isArray(points) ? points.filter(function (n) { return Number(n) > 0; }).sort(function (a, b) { return a - b; }) : [];
+      if (_voiceRemindPoints.length === 0) _voiceRemindPoints = [600, 300, 180, 60, 30];
+    }
+    function speakRemain(remainSec, label, activity) {
+      if (!('speechSynthesis' in window)) return;
+      if (remainSec < 0 || _voiceRemindPoints.length === 0) return;
+      var sessionKey = label + ':' + activity;
+      // 会话切换：重置已播报记录
+      if (_curSessionKey !== sessionKey) { _curSessionKey = sessionKey; _spokenPoints = {}; }
+      var minutes = Math.ceil(remainSec / 60);
+      for (var i = 0; i < _voiceRemindPoints.length; i++) {
+        var point = _voiceRemindPoints[i];
+        // 落入该提醒点的触发窗口（point-60, point]，且此点本次会话尚未播报
+        if (remainSec <= point && remainSec > point - 60) {
+          if (_spokenPoints[point]) break;   // 已播报过，直接结束，避免落入更小窗口重复播
+          _spokenPoints[point] = true;
+          var text = label + '，' + (minutes <= 1 ? '时间到了' : '还剩 ' + minutes + ' 分钟') + '，请保存进度准备结束。';
+          var u = new SpeechSynthesisUtterance(text);
+          u.lang = 'zh-CN';
+          u.rate = 1.0;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+          break;
+        }
+      }
+    }
+    function clearSpoken() { _curSessionKey = null; _spokenPoints = {}; _lastAnnounce = null; }
+    /** 直接播报一段文本（用于后端下发的启动/到期等消息）。相同内容只播一次，避免轮询重复触发。 */
+    var _lastAnnounce = null;
+    function speakText(text) {
+      if (!('speechSynthesis' in window) || !text) return;
+      if (text === _lastAnnounce) return;   // 同一条消息不重复播报
+      _lastAnnounce = text;
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-CN';
+      u.rate = 1.0;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    }
+
     // ---------- 管理员状态页：玩家时间进度条列表 ----------
     function renderDashboard(container) {
       var wrap = el('div');
@@ -747,6 +793,7 @@
         var barI = wrap.querySelector('.js-sessbar > i');
         if (barI) barI.style.width = (remain / total * 100) + '%';
         if (remain <= 0) load();
+        else speakRemain(remain, a.label, a.activity);
       }
 
       function load() {
@@ -754,7 +801,10 @@
           var s = result[0], history = result[1];
           status = s;
           historyRecords = history.records || [];
+          setVoiceRemindPoints(s.reminderSeconds);
           prevActiveId = s.active ? s.active.child : null;
+          if (s.announce && typeof s.announce === 'string') speakText(s.announce);
+          if (!s.active) clearSpoken();
           render(); // 列表小，直接整块重渲染；倒计时由 tick 每秒更新
         }).catch(function (e) {
           clear(wrap);
@@ -765,7 +815,7 @@
       load();
       pollTimer = setInterval(load, 5000);
       tickTimer = setInterval(tick, 1000);
-      return function () { clearInterval(pollTimer); clearInterval(tickTimer); };
+      return function () { clearInterval(pollTimer); clearInterval(tickTimer); clearSpoken(); };
     }
 
     // ---------- 开始游戏（玩家即当前登录账号，无需选人）----------
@@ -978,6 +1028,7 @@
         if (prevRemainMin !== null && remainMin !== prevRemainMin) rw._ring.pulse();
         prevRemainMin = remainMin;
         if (remain <= 0) load();
+        else speakRemain(remain, a.label, a.activity);
       }
 
       function load() {
@@ -985,7 +1036,9 @@
           var s = result[0], history = result[1];
           status = s;
           historyRecords = history.records || [];
-          if (!s.active) prevRemainMin = null;
+          setVoiceRemindPoints(s.reminderSeconds);
+          if (s.announce && typeof s.announce === 'string') speakText(s.announce);
+          if (!s.active) { prevRemainMin = null; clearSpoken(); }
           if (viewKind() !== prevKind || !wrap.querySelector('.card')) render();
           else tick();
         }).catch(function (e) {
@@ -997,7 +1050,7 @@
       load();
       pollTimer = setInterval(load, 5000);
       tickTimer = setInterval(tick, 1000);
-      return function () { clearInterval(pollTimer); clearInterval(tickTimer); };
+      return function () { clearInterval(pollTimer); clearInterval(tickTimer); clearSpoken(); };
     }
 
     // ---------- 配置（管理员）----------
@@ -1112,6 +1165,7 @@
         var roleSel = el('select', {});
         roleSel.appendChild(el('option', { value: 'member' }, '成员（可开关游戏）'));
         roleSel.appendChild(el('option', { value: 'admin' }, '管理员（可改配置/管账号）'));
+        roleSel.appendChild(el('option', { value: 'test' }, '测试（不操作插线板）'));
         var picker = makeAvatarPicker('star');
         var addBtn = el('button', { class: 'btn' }, '添加账号');
         addBtn.onclick = function () {

@@ -76,6 +76,8 @@ export interface ActiveSession {
   plugDids?: string[];
   /** @deprecated 旧单接口字段，仅用于向后兼容读取。 */
   plugDid?: string;
+  /** 测试模式：不操作真实插线板（test 账号专属）。 */
+  testMode?: boolean;
 }
 
 export interface QuotaSnapshot {

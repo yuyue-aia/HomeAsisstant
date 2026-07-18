@@ -21,7 +21,7 @@ import { dirname, resolve } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { logger } from '../common/logger';
 
-export type Role = 'admin' | 'member';
+export type Role = 'admin' | 'member' | 'test';
 
 /** 内置可爱头像 logo（前端映射为 emoji 展示）。 */
 export const AVATARS = ['fox', 'panda', 'dino', 'rocket', 'unicorn', 'tiger', 'octopus', 'star'] as const;
@@ -158,7 +158,7 @@ export class UsersStore {
   ): CreateUserResult {
     const err = this.validateCredential(username, password);
     if (err) return { ok: false, error: err };
-    if (role !== 'admin' && role !== 'member') return { ok: false, error: '角色不合法' };
+    if (role !== 'admin' && role !== 'member' && role !== 'test') return { ok: false, error: '角色不合法' };
     if (this.findByUsername(username)) return { ok: false, error: '用户名已存在' };
 
     const displayName = normalizeDisplayName(opts?.displayName, username.trim());
@@ -243,7 +243,7 @@ export class UsersStore {
   }
 
   updateRole(id: string, role: Role): { ok: boolean; error?: string } {
-    if (role !== 'admin' && role !== 'member') return { ok: false, error: '角色不合法' };
+    if (role !== 'admin' && role !== 'member' && role !== 'test') return { ok: false, error: '角色不合法' };
     const u = this.data.users.find((x) => x.id === id);
     if (!u) return { ok: false, error: '用户不存在' };
     // 不允许把最后一个 admin 降级，避免锁死管理入口

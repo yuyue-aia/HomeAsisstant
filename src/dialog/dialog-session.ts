@@ -101,7 +101,8 @@ export class DialogSession extends EventEmitter {
     // 把主动播报回调注入到游戏机控制器，让 5min/1min/到期提醒能走 TTS。
     // 多个 DialogSession 实例时以最后创建的为准（当前架构是单实例）。
     try {
-      getGameConsoleController().setAnnouncer((text) => this.announce(text));
+      // 语音音箱链路：所有类型（含 reminder）都通过 TTS 播报，无重复问题。
+      getGameConsoleController().setAnnouncer((text, _kind) => this.announce(text));
       // 启动恢复：进程崩溃后续上之前未完成的游戏会话
       void getGameConsoleController()
         .recoverActiveSession()

@@ -21,7 +21,14 @@ import {
 } from './game-quota';
 import { GameSessionTimer } from './game-session-timer';
 
-type Announcer = (text: string) => void | Promise<void>;
+/**
+ * 播报类型：
+ *  - 'start'    开始会话
+ *  - 'reminder' 倒计时提醒（Web 前端已由 speakRemain 独立播报，无需再转发，避免重复）
+ *  - 'expired'  到期/异常提示
+ */
+export type AnnounceKind = 'start' | 'reminder' | 'expired';
+type Announcer = (text: string, kind: AnnounceKind) => void | Promise<void>;
 
 export interface GameConsoleConfig {
   plugIp?: string;
@@ -273,10 +280,10 @@ export class GameConsoleController {
     this.announcer = fn;
   }
 
-  private async announce(text: string): Promise<void> {
+  private async announce(text: string, kind: AnnounceKind = 'start'): Promise<void> {
     if (this.announcer) {
       try {
-        await this.announcer(text);
+        await this.announcer(text, kind);
         return;
       } catch (error) {
         logger.warn('game-console.announce_failed', {
@@ -285,7 +292,7 @@ export class GameConsoleController {
         });
       }
     }
-    logger.info('game-console.announce', { text });
+    logger.info('game-console.announce', { text, kind });
   }
 
   // ---------------- 设备 ----------------
@@ -389,7 +396,7 @@ export class GameConsoleController {
       if (r.ok) return true;
       logger.warn('game-console.power_off_failed', { attempt, error: r.error });
     }
-    await this.announce('设备控制失败，请手动关闭电源。');
+    await this.announce('设备控制失败，请手动关闭电源。', 'expired');
     return false;
   }
 
@@ -423,7 +430,7 @@ export class GameConsoleController {
   async start(
     rawChild: string | null | undefined,
     rawMinutes: number,
-    opts?: { label?: string; activity?: ActivityType },
+    opts?: { label?: string; activity?: ActivityType; testMode?: boolean },
   ): Promise<GameStartResult> {
     const activity: ActivityType = opts?.activity === 'tv' ? 'tv' : 'game';
     const actWord = activity === 'tv' ? '看电视' : '玩游戏';
@@ -505,22 +512,26 @@ export class GameConsoleController {
       };
     }
 
-    // 6) 通电（按活动决定接口：游戏 S3+S4，电视 S3）
-    const dids = this.plugDidsFor(activity);
-    const power = await this.powerOnMany(dids);
-    if (!power.ok) {
-      const reason: StartReason =
-        power.error === 'plug_not_configured' ? 'plug_not_configured' : 'plug_failed';
-      return {
-        ok: false,
-        child,
-        activity,
-        reason,
-        message:
-          reason === 'plug_not_configured'
-            ? '设备插板还没配置好，告诉爸爸帮你看一下。'
-            : '设备打不开，可能插板没连上，请告诉爸爸帮你看一下。',
-      };
+    // 6) 通电（按活动决定接口：游戏 S3+S4，电视 S3）；测试账号跳过真实操作。
+    const testMode = !!opts?.testMode;
+    let dids: string[] = [];
+    if (!testMode) {
+      dids = this.plugDidsFor(activity);
+      const power = await this.powerOnMany(dids);
+      if (!power.ok) {
+        const reason: StartReason =
+          power.error === 'plug_not_configured' ? 'plug_not_configured' : 'plug_failed';
+        return {
+          ok: false,
+          child,
+          activity,
+          reason,
+          message:
+            reason === 'plug_not_configured'
+              ? '设备插板还没配置好，告诉爸爸帮你看一下。'
+              : '设备打不开，可能插板没连上，请告诉爸爸帮你看一下。',
+        };
+      }
     }
 
     // 7) 写 active + 调度
@@ -534,6 +545,7 @@ export class GameConsoleController {
       plannedMinutes: minutes,
       endsAt: endsAt.toISOString(),
       plugDids: dids,
+      testMode,
     };
     this.quota.setActiveSession(session);
     this.scheduleTimers(session);
@@ -545,6 +557,11 @@ export class GameConsoleController {
       plugDids: dids,
       plannedMinutes: minutes,
       endsAt: session.endsAt,
+    });
+
+    const announceText = `${profile.label}，${actWord} ${minutes} 分钟，到 ${fmtTime(endsAt.toISOString())} 结束。`;
+    this.announce(announceText, 'start').catch((err) => {
+      logger.warn('game-console.start_announce_failed', { error: (err as Error).message });
     });
 
     return {
@@ -591,9 +608,14 @@ export class GameConsoleController {
     const actualMinutes = Math.min(planned, Math.max(1, Math.ceil((now - startedAtMs) / 60_000)));
 
     this.timer.cancel();
-    const off = await this.powerOffMany(this.sessionDids(active));
-    if (!off.ok) {
-      logger.warn('game-console.stop_power_off_failed', { error: off.error });
+    let off: Awaited<ReturnType<typeof this.powerOffMany>>;
+    if (active.testMode) {
+      off = { ok: true };
+    } else {
+      off = await this.powerOffMany(this.sessionDids(active));
+      if (!off.ok) {
+        logger.warn('game-console.stop_power_off_failed', { error: off.error });
+      }
     }
 
     const remaining = this.quota.finishSession(
@@ -692,7 +714,7 @@ export class GameConsoleController {
           secondsLeft >= 60 && secondsLeft % 60 === 0
             ? `还有 ${secondsLeft / 60} 分钟`
             : `还有 ${secondsLeft} 秒`;
-        await this.announce(`${label}，${phrase}就要关游戏机了。`);
+        await this.announce(`${label}，${phrase}就要关游戏机了。`, 'reminder');
       },
       onExpired: async () => {
         await this.handleExpired(session);
@@ -709,7 +731,12 @@ export class GameConsoleController {
     }
 
     const label = session.label ?? session.child;
-    const ok = await this.powerOffOnExpire(this.sessionDids(session));
+    let ok: boolean;
+    if (session.testMode) {
+      ok = true;
+    } else {
+      ok = await this.powerOffOnExpire(this.sessionDids(session));
+    }
     const remaining = this.quota.finishSession(
       session,
       session.plannedMinutes,
@@ -729,6 +756,7 @@ export class GameConsoleController {
     if (ok) {
       await this.announce(
         `时间到了，已经关闭设备。${label}今天还剩 ${remaining} 分钟。`,
+        'expired',
       );
     }
   }
@@ -764,9 +792,14 @@ export class GameConsoleController {
         child: active.child,
         endsAt: active.endsAt,
       });
-      const off = await this.powerOffMany(this.sessionDids(active));
-      if (!off.ok) {
-        logger.warn('game-console.recover.power_off_failed', { error: off.error });
+      let off: Awaited<ReturnType<typeof this.powerOffMany>>;
+      if (active.testMode) {
+        off = { ok: true };
+      } else {
+        off = await this.powerOffMany(this.sessionDids(active));
+        if (!off.ok) {
+          logger.warn('game-console.recover.power_off_failed', { error: off.error });
+        }
       }
       this.quota.finishSession(
         active,
