@@ -6,6 +6,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "start": "NODE_OPTIONS=\"--disable-warning=DEP0040\" tsx src/cli/cli.ts start",
+    "web": "tsx src/web/start-web.ts",
     "stop": "tsx src/cli/cli.ts stop",
     "status": "tsx src/cli/cli.ts status",
     "logs": "tsx src/cli/cli.ts logs",

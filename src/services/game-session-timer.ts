@@ -6,10 +6,10 @@
  */
 
 import { logger } from '../common/logger';
-import type { ChildKey } from './game-quota';
+import type { PlayerId } from './game-quota';
 
 export interface StartOptions {
-  child: ChildKey;
+  child: PlayerId;
   /** 计划结束时间 */
   endsAt: Date;
   /** 到期前几秒提醒，默认 [300, 60]（即 5 分钟 / 1 分钟） */
@@ -21,7 +21,7 @@ export interface StartOptions {
 }
 
 interface InternalTimer {
-  child: ChildKey;
+  child: PlayerId;
   endsAt: number;
   timers: NodeJS.Timeout[];
 }
@@ -102,7 +102,7 @@ export class GameSessionTimer {
     return this.cur !== null;
   }
 
-  getCurrent(): { child: ChildKey; endsAt: Date } | null {
+  getCurrent(): { child: PlayerId; endsAt: Date } | null {
     if (!this.cur) return null;
     return { child: this.cur.child, endsAt: new Date(this.cur.endsAt) };
   }

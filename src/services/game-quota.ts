@@ -15,6 +15,14 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, resolve } from 'node:path';
 import { logger } from '../common/logger';
 
+/**
+ * 玩家标识。历史上只有固定的余晓/余跃（ChildKey），现已泛化为通用字符串：
+ * - 语音链路仍用内置的 'yuxiao' / 'yuyue'（见 CHILDREN）；
+ * - Web 链路用各账号的 id 作为玩家 ID（谁登录就是谁）。
+ * 二者共用同一台游戏机的配额与互斥逻辑，互不冲突。
+ */
+export type PlayerId = string;
+
 export type ChildKey = 'yuxiao' | 'yuyue';
 
 export interface ChildProfile {
@@ -50,20 +58,32 @@ export function resolveChildKey(input: string | null | undefined): ChildKey | nu
   return null;
 }
 
+/** 会话活动类型：玩游戏 or 看电视（共享同一份配额）。 */
+export type ActivityType = 'game' | 'tv';
+
 export interface ActiveSession {
-  child: ChildKey;
+  child: PlayerId;
+  /** 玩家显示名（播报/展示用）。旧数据可能缺失，使用处以 child 兜底。 */
+  label?: string;
+  /** 本次活动：玩游戏 / 看电视。旧数据缺失时按 'game' 处理。 */
+  activity?: ActivityType;
   /** ISO datetime */
   startedAt: string;
   plannedMinutes: number;
   /** ISO datetime，= startedAt + plannedMinutes */
   endsAt: string;
-  plugDid: string;
+  /** 本次实际通电的接口集合（停止/到期时精确断电）。旧数据用 plugDid 兜底。 */
+  plugDids?: string[];
+  /** @deprecated 旧单接口字段，仅用于向后兼容读取。 */
+  plugDid?: string;
 }
 
 export interface QuotaSnapshot {
-  child: ChildKey;
+  child: PlayerId;
   date: string; // YYYY-MM-DD（本地时区）
   dailyQuotaMin: number;
+  /** 管理员当天临时加时（按自然日重置） */
+  bonusMinutes: number;
   usedMinutes: number;
   remainingMinutes: number;
   allowedToday: boolean;
@@ -72,11 +92,13 @@ export interface QuotaSnapshot {
 interface PersistedUserQuota {
   date: string;
   usedMinutes: number;
+  /** 当天临时加时分钟数（管理员发放，跨天清零） */
+  bonusMinutes?: number;
 }
 
 interface PersistedState {
   version: 1;
-  users: Partial<Record<ChildKey, PersistedUserQuota>>;
+  users: Partial<Record<PlayerId, PersistedUserQuota>>;
   activeSession: ActiveSession | null;
 }
 
@@ -129,7 +151,7 @@ export function localDateString(date: Date = new Date()): string {
 }
 
 export class GameQuotaService {
-  private readonly cfg: GameQuotaConfig;
+  private cfg: GameQuotaConfig;
   private state: PersistedState;
   private writeChain: Promise<void> = Promise.resolve();
 
@@ -142,41 +164,112 @@ export class GameQuotaService {
     return this.cfg;
   }
 
+  /**
+   * 运行时热更新配额相关配置（Web 管理端保存后调用）。
+   * 只覆盖传入的字段，持久化文件路径 `file` 不允许改。
+   */
+  updateConfig(partial: Partial<Omit<GameQuotaConfig, 'file'>>): GameQuotaConfig {
+    const next: GameQuotaConfig = { ...this.cfg };
+    if (Number.isFinite(partial.dailyQuotaMin) && (partial.dailyQuotaMin as number) >= 0) {
+      next.dailyQuotaMin = Math.floor(partial.dailyQuotaMin as number);
+    }
+    if (Array.isArray(partial.allowedWeekdays)) {
+      const wd = partial.allowedWeekdays
+        .map((n) => Math.floor(Number(n)))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+      next.allowedWeekdays = Array.from(new Set(wd));
+    }
+    if (Number.isFinite(partial.maxSingleSessionMin) && (partial.maxSingleSessionMin as number) > 0) {
+      next.maxSingleSessionMin = Math.floor(partial.maxSingleSessionMin as number);
+    }
+    if (Number.isFinite(partial.minSingleSessionMin) && (partial.minSingleSessionMin as number) > 0) {
+      next.minSingleSessionMin = Math.floor(partial.minSingleSessionMin as number);
+    }
+    if (next.minSingleSessionMin > next.maxSingleSessionMin) {
+      next.minSingleSessionMin = next.maxSingleSessionMin;
+    }
+    this.cfg = next;
+    return next;
+  }
+
   // ---------------- 公共能力 ----------------
 
   isAllowedToday(now: Date = new Date()): boolean {
     return this.cfg.allowedWeekdays.includes(now.getDay());
   }
 
-  getSnapshot(child: ChildKey, now: Date = new Date()): QuotaSnapshot {
+  getSnapshot(child: PlayerId, now: Date = new Date()): QuotaSnapshot {
     const today = localDateString(now);
     const cur = this.state.users[child];
-    const used = cur && cur.date === today ? cur.usedMinutes : 0;
+    const sameDay = !!(cur && cur.date === today);
+    const used = sameDay ? cur!.usedMinutes : 0;
+    const bonus = sameDay ? cur!.bonusMinutes ?? 0 : 0;
     const daily = this.cfg.dailyQuotaMin;
+    const effective = daily + bonus; // 当日可用总额 = 基础配额 + 临时加时
     return {
       child,
       date: today,
       dailyQuotaMin: daily,
+      bonusMinutes: bonus,
       usedMinutes: used,
-      remainingMinutes: Math.max(0, daily - used),
+      remainingMinutes: Math.max(0, effective - used),
       allowedToday: this.isAllowedToday(now),
     };
   }
 
   /** 扣减配额。minutes < 0 视为退还。返回最新剩余分钟数。 */
-  consume(child: ChildKey, minutes: number, now: Date = new Date()): number {
+  consume(child: PlayerId, minutes: number, now: Date = new Date()): number {
     if (!Number.isFinite(minutes)) throw new Error(`Invalid minutes: ${minutes}`);
     const today = localDateString(now);
     const cur = this.state.users[child];
-    let used = cur && cur.date === today ? cur.usedMinutes : 0;
+    const sameDay = !!(cur && cur.date === today);
+    let used = sameDay ? cur!.usedMinutes : 0;
+    const bonus = sameDay ? cur!.bonusMinutes ?? 0 : 0;
+    const effective = this.cfg.dailyQuotaMin + bonus;
     used = Math.max(0, used + Math.round(minutes));
-    used = Math.min(used, this.cfg.dailyQuotaMin); // 不允许超过当日上限
-    this.state.users[child] = { date: today, usedMinutes: used };
+    used = Math.min(used, effective); // 不允许超过当日可用总额（含临时加时）
+    this.state.users[child] = { date: today, usedMinutes: used, bonusMinutes: bonus };
     this.scheduleFlush();
-    return Math.max(0, this.cfg.dailyQuotaMin - used);
+    return Math.max(0, effective - used);
   }
 
-  refund(child: ChildKey, minutes: number, now?: Date): number {
+  /**
+   * 管理员临时加时（正数增加、负数收回），仅当天有效、跨天清零。
+   * bonus 不会降到 0 以下。返回最新剩余分钟数。
+   */
+  addBonus(child: PlayerId, minutes: number, now: Date = new Date()): number {
+    if (!Number.isFinite(minutes)) throw new Error(`Invalid minutes: ${minutes}`);
+    const today = localDateString(now);
+    const cur = this.state.users[child];
+    const sameDay = !!(cur && cur.date === today);
+    const used = sameDay ? cur!.usedMinutes : 0;
+    let bonus = sameDay ? cur!.bonusMinutes ?? 0 : 0;
+    bonus = Math.max(0, bonus + Math.round(minutes));
+    this.state.users[child] = { date: today, usedMinutes: used, bonusMinutes: bonus };
+    this.scheduleFlush();
+    return Math.max(0, this.cfg.dailyQuotaMin + bonus - used);
+  }
+
+  /**
+   * 管理员直接设定某玩家今日总时间（总额）为 target 分钟（精确设置，非增量）。
+   * 保持已用时间 usedMinutes 不变，通过 bonus 使总额 == target：
+   *   总额 = dailyQuotaMin + bonus，因此 bonus = target - daily（允许为负以支持低于基础配额）。
+   * 仅当天有效、跨天重置。返回设置后的今日总时间（分钟）。
+   */
+  setTotal(child: PlayerId, targetMinutes: number, now: Date = new Date()): number {
+    if (!Number.isFinite(targetMinutes)) throw new Error(`Invalid minutes: ${targetMinutes}`);
+    const target = Math.max(0, Math.round(targetMinutes));
+    const today = localDateString(now);
+    const cur = this.state.users[child];
+    const sameDay = !!(cur && cur.date === today);
+    const used = sameDay ? cur!.usedMinutes : 0;
+    const bonus = target - this.cfg.dailyQuotaMin;
+    this.state.users[child] = { date: today, usedMinutes: used, bonusMinutes: bonus };
+    this.scheduleFlush();
+    return target;
+  }
+
+  refund(child: PlayerId, minutes: number, now?: Date): number {
     return this.consume(child, -Math.abs(minutes), now);
   }
 

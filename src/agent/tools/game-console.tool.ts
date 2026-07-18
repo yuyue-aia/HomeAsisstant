@@ -28,25 +28,30 @@ const controlGameConsoleParameters = z.object({
     .nullable()
     .optional()
     .describe('要玩的分钟数；start_game 必填'),
+  activity: z
+    .enum(['game', 'tv'])
+    .nullable()
+    .optional()
+    .describe('活动类型：game=玩游戏（默认），tv=看电视。看电视/看动画片时传 tv。游戏与电视共享同一份时长配额'),
 });
 
 type ControlGameConsoleResult = {
   ok: boolean;
   action: 'start_game' | 'stop_game' | 'status';
-  child?: 'yuxiao' | 'yuyue';
+  child?: string;
   reason?: string;
   remainingMinutes?: number;
   plannedMinutes?: number;
   actualMinutes?: number;
   endsAtIso?: string;
   active?: {
-    child: 'yuxiao' | 'yuyue';
+    child: string;
     startedAtIso: string;
     endsAtIso: string;
     remainingMinutes: number;
   };
   quotas?: Array<{
-    child: 'yuxiao' | 'yuyue';
+    child: string;
     label: string;
     dailyQuotaMin: number;
     usedMinutes: number;
@@ -64,7 +69,7 @@ export const controlGameConsoleTool = tool<
   description:
     '控制小朋友的 Switch 游戏机：申请启动（按配额通电并定时断电）、提前停止、查询今日剩余时间和当前是否有人在玩。每人每天 1 小时上限，单次最少 5 分钟。',
   parameters: controlGameConsoleParameters,
-  async execute({ action, child, minutes }) {
+  async execute({ action, child, minutes, activity }) {
     const ctrl = getGameConsoleController();
     try {
       if (action === 'status') {
@@ -98,7 +103,7 @@ export const controlGameConsoleTool = tool<
             message: '要先告诉我想玩多少分钟。',
           };
         }
-        const r = await ctrl.start(child ?? null, minutes);
+        const r = await ctrl.start(child ?? null, minutes, { activity: activity ?? 'game' });
         logger.info('tool.game_console.start', {
           child: r.child,
           ok: r.ok,

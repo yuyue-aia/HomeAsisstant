@@ -44,14 +44,28 @@ function formatDay(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** 把单个 meta 值格式化为日志字段：对象/数组走 JSON，含空格的字符串加引号。 */
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  const s = String(v);
+  return /\s/.test(s) ? JSON.stringify(s) : s;
+}
+
+/**
+ * 标准文本日志行：
+ *   2026-07-18T01:42:06.920Z INFO  web.request method=GET path=/api/... status=200
+ * 时间(ISO) + 级别(右补齐5位) + 消息 + 扁平化的 key=value 字段。
+ */
 function log(level: string, message: string, meta?: LogMeta): void {
-  const payload = {
-    level,
-    time: new Date().toISOString(),
-    message,
-    ...(meta && Object.keys(meta).length > 0 ? { meta } : {}),
-  };
-  const line = JSON.stringify(payload) + '\n';
+  const time = new Date().toISOString();
+  const lvl = level.toUpperCase().padEnd(5);
+  let line = `${time} ${lvl} ${message}`;
+  if (meta && Object.keys(meta).length > 0) {
+    const parts = Object.entries(meta).map(([k, v]) => `${k}=${formatValue(v)}`);
+    line += ' ' + parts.join(' ');
+  }
+  line += '\n';
   try {
     ensureStream().write(line);
   } catch (err) {
