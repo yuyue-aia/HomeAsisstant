@@ -3,6 +3,7 @@ node_modules/
 .DS_Store
 *.log
 .runtime/
+.run/
 models/sherpa-onnx-*/
 models/*.tar.bz2
 

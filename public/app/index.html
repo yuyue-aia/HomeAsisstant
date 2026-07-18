@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#FBF7F0" />
+  <title>游戏管家</title>
+  <style>
+    :root {
+      --bg: #FBF7F0;
+      --surface: #FFFFFF;
+      --ink: #2B2B33;
+      --muted: #8A8578;
+      --line: #ECE6DA;
+      --yuxiao: #4C8DFF;
+      --yuyue: #FF7A59;
+      --go: #2FBF71;
+      --stop: #E8503A;
+      --shadow: 0 10px 30px -12px rgba(43, 43, 51, .18);
+      --radius: 22px;
+      font-synthesis-weight: none;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(1200px 600px at 50% -10%, #FFFDF8 0%, var(--bg) 60%);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      font-variant-numeric: tabular-nums;
+    }
+    #root { max-width: 1080px; margin: 0 auto; padding: 0 18px calc(28px + env(safe-area-inset-bottom)); }
+
+    /* 响应式布局：桌面左侧导航 + 内容区；手机顶部横向导航 + 单列 */
+    .layout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+    .content { min-width: 0; }
+    .sidenav { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 6px;
+      background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 10px; box-shadow: var(--shadow); }
+    .sidenav a { text-decoration: none; text-align: left; padding: 12px 14px; border-radius: 12px;
+      font-size: 14.5px; font-weight: 700; color: var(--muted); background: transparent; transition: background .12s, color .12s; display: block; }
+    .sidenav a:hover { background: #F7F3EA; color: var(--ink); }
+    .sidenav a.active { background: #F1ECE1; color: var(--ink); }
+    .center-screen > * { max-width: 400px; margin-left: auto; margin-right: auto; width: 100%; }
+    @media (max-width: 760px) {
+      #root { max-width: 520px; }
+      .layout { grid-template-columns: 1fr; gap: 0; }
+      .sidenav { position: static; flex-direction: row; overflow-x: auto; margin-bottom: 16px;
+        padding: 5px; gap: 6px; background: #F1ECE1; border: none; box-shadow: none; }
+      .sidenav a { flex: 1 0 auto; text-align: center; padding: 10px 16px; white-space: nowrap; }
+      .sidenav a.active { background: var(--surface); box-shadow: 0 4px 12px -6px rgba(0,0,0,.2); }
+    }
+
+    .brand { display: flex; align-items: center; gap: 10px; padding: 22px 4px 8px; flex-wrap: wrap; }
+    .brand .dot { width: 26px; height: 26px; border-radius: 9px;
+      background: conic-gradient(from 140deg, var(--yuxiao), var(--yuyue), var(--go), var(--yuxiao)); }
+    .brand h1 { font-size: 19px; margin: 0; letter-spacing: .5px; font-weight: 800; }
+    .brand .who { margin-left: auto; font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 20px; }
+    .stack { display: grid; gap: 14px; }
+    label.field { display: grid; gap: 7px; font-size: 13px; color: var(--muted); font-weight: 600; }
+    input, select {
+      width: 100%; padding: 13px 14px; border: 1.5px solid var(--line); border-radius: 14px;
+      font-size: 16px; color: var(--ink); background: #FCFBF8; outline: none; transition: border-color .15s, box-shadow .15s;
+      font-family: inherit;
+    }
+    input:focus, select:focus { border-color: var(--yuxiao); box-shadow: 0 0 0 4px rgba(76, 141, 255, .12); }
+    button { font-family: inherit; cursor: pointer; border: none; }
+    .btn { width: 100%; padding: 15px; border-radius: 15px; font-size: 16px; font-weight: 800; letter-spacing: .5px;
+      color: #fff; background: var(--ink); transition: transform .08s ease, filter .15s; }
+    .btn:active { transform: translateY(1px) scale(.995); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.go { background: linear-gradient(180deg, #3ccb7e, var(--go)); }
+    .btn.stop { background: linear-gradient(180deg, #f0604b, var(--stop)); }
+    .btn.ghost { background: transparent; color: var(--ink); border: 1.5px solid var(--line); }
+    .btn.sm { width: auto; padding: 9px 14px; font-size: 13.5px; border-radius: 11px; }
+    .err { background: #FDECEA; color: #B02A16; border: 1px solid #F6C9C0; padding: 11px 13px;
+      border-radius: 12px; font-size: 13.5px; }
+    .ok-toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+      background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 999px; font-size: 14px;
+      box-shadow: var(--shadow); z-index: 50; animation: pop .25s ease; }
+    @keyframes pop { from { opacity: 0; transform: translate(-50%, 8px); } }
+    .muted { color: var(--muted); font-size: 13px; }
+    .center-screen { min-height: 78vh; display: flex; flex-direction: column; justify-content: center; }
+
+    .modal-mask { position: fixed; inset: 0; background: rgba(43,43,51,.42); z-index: 60;
+      display: flex; align-items: center; justify-content: center; padding: 20px;
+      animation: fade .18s ease; }
+    @keyframes fade { from { opacity: 0; } }
+    .modal-card { width: 100%; max-width: 380px; }
+    .modal-head { display: flex; align-items: center; margin-bottom: 4px; }
+    .modal-head h3 { margin: 0; font-size: 17px; font-weight: 800; }
+    .modal-head .x { margin-left: auto; background: transparent; color: var(--muted); font-size: 22px;
+      line-height: 1; padding: 2px 6px; }
+
+    .tabs { display: flex; gap: 6px; background: #F1ECE1; padding: 5px; border-radius: 16px; margin: 4px 0 18px; }
+    .tabs button { flex: 1; padding: 10px; border-radius: 12px; font-size: 13.5px; font-weight: 700;
+      color: var(--muted); background: transparent; transition: all .15s; }
+    .tabs button.active { background: var(--surface); color: var(--ink); box-shadow: 0 4px 12px -6px rgba(0,0,0,.2); }
+
+    .ring-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0 4px; }
+    .ring { position: relative; width: 240px; height: 240px; }
+    .ring svg { transform: rotate(-90deg); display: block; }
+    .ring .track { fill: none; stroke: var(--line); stroke-width: 14; }
+    .ring .prog { fill: none; stroke-width: 14; stroke-linecap: round;
+      transition: stroke-dashoffset .9s cubic-bezier(.4,0,.2,1), stroke .4s; }
+    .ring .inner { position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; text-align: center; }
+    .ring .big { font-size: 52px; font-weight: 800; line-height: 1; letter-spacing: -1px; }
+    .ring .cap { font-size: 13.5px; color: var(--muted); margin-top: 8px; font-weight: 600; }
+    .ring .name { font-size: 15px; font-weight: 800; margin-bottom: 2px; }
+    .pulse { animation: pulse 1.1s ease; }
+    @keyframes pulse { 0% { transform: scale(1);} 40% { transform: scale(1.04);} 100% { transform: scale(1);} }
+
+    .status-line { display: flex; align-items: center; gap: 9px; justify-content: center;
+      font-size: 14px; font-weight: 700; margin-top: 2px; }
+    .led { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .led.on { background: var(--go); box-shadow: 0 0 0 4px rgba(47,191,113,.18); }
+    .led.off { background: #C9C2B4; }
+
+    .bar { height: 10px; background: var(--line); border-radius: 999px; overflow: hidden; }
+    .bar > i { display: block; height: 100%; border-radius: 999px; background: var(--go); transition: width .5s ease; }
+    .plist-row { display: flex; align-items: center; gap: 12px; padding: 15px 2px; border-bottom: 1px solid var(--line); }
+    .plist-row:last-child { border-bottom: none; }
+    .plist-av { width: 42px; height: 42px; border-radius: 13px; display: flex; align-items: center;
+      justify-content: center; font-size: 23px; flex: 0 0 auto; }
+    .plist-num { font-weight: 800; font-size: 19px; flex: 0 0 auto; min-width: 34px; text-align: right; }
+    .playing-dot { font-size: 11px; font-weight: 800; color: var(--go); margin-left: 6px; }
+    .active-banner { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+    .qcard { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 14px;
+      display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    .qcard .mini { position: relative; width: 78px; height: 78px; }
+    .qcard .mini .lbl { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 17px; font-weight: 800; }
+    .qcard .cname { font-size: 14px; font-weight: 800; text-align: center; }
+    .qcard .csub { font-size: 12px; color: var(--muted); text-align: center; }
+
+    .kid-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .kid { border: 2px solid var(--line); border-radius: 18px; padding: 18px 12px; text-align: center;
+      background: var(--surface); font-weight: 800; font-size: 16px; transition: all .15s; color: var(--ink); }
+    .kid .av { width: 46px; height: 46px; border-radius: 50%; margin: 0 auto 8px; display: flex;
+      align-items: center; justify-content: center; color: #fff; font-size: 20px; font-weight: 800; }
+    .kid.sel-yuxiao { border-color: var(--yuxiao); box-shadow: 0 0 0 4px rgba(76,141,255,.12); }
+    .kid.sel-yuyue { border-color: var(--yuyue); box-shadow: 0 0 0 4px rgba(255,122,89,.12); }
+    .qcard.me { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(43,43,51,.08); }
+    .player-hero { display: flex; align-items: center; gap: 14px; padding: 14px 16px;
+      border: 2px solid var(--line); border-radius: 18px; background: #FCFBF8; }
+    .player-hero-av { width: 54px; height: 54px; border-radius: 16px; display: flex;
+      align-items: center; justify-content: center; font-size: 30px; }
+    .player-hero-name { font-size: 18px; font-weight: 800; }
+    .av-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .av-opt { aspect-ratio: 1/1; border: 2px solid var(--line); border-radius: 14px; background: var(--surface);
+      font-size: 26px; display: flex; align-items: center; justify-content: center; transition: all .12s; }
+    .av-opt.sel { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(43,43,51,.1); transform: scale(1.03); }
+    .mins { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .mins button { padding: 13px 0; border-radius: 13px; border: 1.5px solid var(--line); background: var(--surface);
+      font-weight: 800; font-size: 15px; color: var(--ink); }
+    .mins button.sel { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+    .row { display: flex; align-items: center; gap: 10px; padding: 13px 2px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .row:last-child { border-bottom: none; }
+    .row .grow { flex: 1; min-width: 120px; }
+    .row .uname { font-weight: 800; font-size: 15px; }
+    .tag { font-size: 11px; font-weight: 800; padding: 3px 9px; border-radius: 999px; }
+    .tag.admin { background: #EAF1FF; color: #2f6bdb; }
+    .tag.member { background: #F1ECE1; color: var(--muted); }
+    .section-title { font-size: 13px; font-weight: 800; color: var(--muted); letter-spacing: 1px;
+      text-transform: uppercase; margin: 22px 4px 10px; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { padding: 9px 13px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--surface);
+      font-weight: 700; font-size: 13.5px; color: var(--muted); }
+    .chip.on { background: var(--yuxiao); border-color: var(--yuxiao); color: #fff; }
+    @media (prefers-reduced-motion: reduce) {
+      .ring .prog { transition: none; } .pulse { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ---------- 小工具：DOM 构造（textNode 渲染，天然防 XSS）----------
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    function el(tag, props) {
+      var e = document.createElement(tag);
+      if (props) {
+        for (var k in props) {
+          if (!Object.prototype.hasOwnProperty.call(props, k)) continue;
+          var v = props[k];
+          if (v == null) continue;
+          if (k === 'class') e.className = v;
+          else if (k === 'style' && typeof v === 'object') { for (var s in v) e.style[s] = v[s]; }
+          else if (k.slice(0, 2) === 'on' && typeof v === 'function') e.addEventListener(k.slice(2).toLowerCase(), v);
+          else if (k === 'value') e.value = v;
+          else e.setAttribute(k, v);
+        }
+      }
+      for (var i = 2; i < arguments.length; i++) append(e, arguments[i]);
+      return e;
+    }
+    function svg(tag, props) {
+      var e = document.createElementNS(SVGNS, tag);
+      if (props) for (var k in props) if (props[k] != null) e.setAttribute(k, props[k]);
+      return e;
+    }
+    function append(parent, child) {
+      if (child == null || child === false) return;
+      if (Array.isArray(child)) { child.forEach(function (c) { append(parent, c); }); return; }
+      if (child.nodeType) parent.appendChild(child);
+      else parent.appendChild(document.createTextNode(String(child)));
+    }
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+    // ---------- 常量 ----------
+    // 内置头像 logo（与后端 AVATARS 顺序一致）
+    var AVATARS = ['fox', 'panda', 'dino', 'rocket', 'unicorn', 'tiger', 'octopus', 'star'];
+    var AVATAR_META = {
+      fox:     { emoji: '🦊', color: '#FF7A59' },
+      panda:   { emoji: '🐼', color: '#5B6472' },
+      dino:    { emoji: '🦕', color: '#2FBF71' },
+      rocket:  { emoji: '🚀', color: '#4C8DFF' },
+      unicorn: { emoji: '🦄', color: '#B06BE0' },
+      tiger:   { emoji: '🐯', color: '#F2A93B' },
+      octopus: { emoji: '🐙', color: '#E0559B' },
+      star:    { emoji: '🌟', color: '#EAB308' }
+    };
+    function avEmoji(id) { return (AVATAR_META[id] || AVATAR_META.star).emoji; }
+    function avColor(id) { return (AVATAR_META[id] || AVATAR_META.star).color; }
+
+    // ---------- API ----------
+    function api(path, opts) {
+      opts = opts || {};
+      var init = { method: opts.method || 'GET', headers: {}, credentials: 'same-origin' };
+      if (opts.body !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(opts.body);
+      }
+      return fetch('/api' + path, init).then(function (res) {
+        return res.text().then(function (text) {
+          var data = null;
+          if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+          if (!res.ok) {
+            var msg = (data && data.error) || ('请求失败 (' + res.status + ')');
+            var err = new Error(msg); err.status = res.status; throw err;
+          }
+          return data;
+        });
+      });
+    }
+
+    // ---------- toast ----------
+    var toastTimer = null;
+    function toast(msg) {
+      var old = document.querySelector('.ok-toast');
+      if (old) old.remove();
+      var n = el('div', { class: 'ok-toast' }, msg);
+      document.body.appendChild(n);
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { n.remove(); }, 2200);
+    }
+
+    // ---------- 修改自己密码（所有账号可用）----------
+    function openChangePassword() {
+      var errBox = el('div');
+      var oldP = el('input', { type: 'password', autocomplete: 'current-password', placeholder: '当前密码' });
+      var newP = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '至少 6 位' });
+      var confP = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '再输一次新密码' });
+      var saveBtn = el('button', { class: 'btn' }, '保存新密码');
+
+      var mask = el('div', { class: 'modal-mask' });
+      function close() { mask.remove(); }
+      mask.onclick = function (e) { if (e.target === mask) close(); };
+
+      saveBtn.onclick = function () {
+        clear(errBox);
+        if (newP.value !== confP.value) { errBox.appendChild(el('div', { class: 'err' }, '两次输入的新密码不一致')); return; }
+        saveBtn.disabled = true; saveBtn.textContent = '保存中…';
+        api('/auth/change-password', { method: 'POST', body: { oldPassword: oldP.value, newPassword: newP.value } })
+          .then(function () { close(); toast('密码已修改'); })
+          .catch(function (e) {
+            errBox.appendChild(el('div', { class: 'err' }, e.message));
+            saveBtn.disabled = false; saveBtn.textContent = '保存新密码';
+          });
+      };
+
+      var card = el('div', { class: 'card stack modal-card' },
+        el('div', { class: 'modal-head' }, el('h3', {}, '修改密码'),
+          el('button', { class: 'x', onclick: close }, '×')),
+        errBox,
+        el('label', { class: 'field' }, '当前密码', oldP),
+        el('label', { class: 'field' }, '新密码', newP),
+        el('label', { class: 'field' }, '确认新密码', confP),
+        saveBtn);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+      oldP.focus();
+    }
+
+    // ---------- 头像选择器（复用）----------
+    function makeAvatarPicker(selectedId) {
+      var current = AVATARS.indexOf(selectedId) >= 0 ? selectedId : 'star';
+      var grid = el('div', { class: 'av-picker' });
+      AVATARS.forEach(function (id) {
+        var opt = el('button', { type: 'button', class: 'av-opt' + (id === current ? ' sel' : '') }, avEmoji(id));
+        opt.onclick = function () {
+          current = id;
+          Array.prototype.forEach.call(grid.children, function (c, i) {
+            c.className = 'av-opt' + (AVATARS[i] === current ? ' sel' : '');
+          });
+        };
+        grid.appendChild(opt);
+      });
+      return { node: grid, get: function () { return current; } };
+    }
+
+    // ---------- 编辑资料（昵称 + 头像），endpoint 决定改自己还是改他人 ----------
+    function openEditProfile(user, endpoint, onSaved) {
+      var errBox = el('div');
+      var nameInput = el('input', { value: user.displayName, placeholder: '玩家昵称，1~24 字' });
+      var picker = makeAvatarPicker(user.avatar);
+      var saveBtn = el('button', { class: 'btn' }, '保存');
+      var mask = el('div', { class: 'modal-mask' });
+      function close() { mask.remove(); }
+      mask.onclick = function (e) { if (e.target === mask) close(); };
+      saveBtn.onclick = function () {
+        clear(errBox);
+        saveBtn.disabled = true; saveBtn.textContent = '保存中…';
+        api(endpoint, { method: 'PUT', body: { displayName: nameInput.value, avatar: picker.get() } })
+          .then(function (d) { close(); toast('资料已更新'); onSaved && onSaved(d && d.user); })
+          .catch(function (e) {
+            errBox.appendChild(el('div', { class: 'err' }, e.message));
+            saveBtn.disabled = false; saveBtn.textContent = '保存';
+          });
+      };
+      var card = el('div', { class: 'card stack modal-card' },
+        el('div', { class: 'modal-head' }, el('h3', {}, '编辑资料'), el('button', { class: 'x', onclick: close }, '×')),
+        errBox,
+        el('label', { class: 'field' }, '玩家昵称', nameInput),
+        el('div', {}, el('div', { class: 'field', style: { marginBottom: '8px' } }, '选择头像'), picker.node),
+        saveBtn);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+      nameInput.focus();
+    }
+
+    // ---------- 管理员为某玩家设置新密码 ----------
+    function openAdminSetPassword(user) {
+      var errBox = el('div');
+      var p1 = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '至少 6 位' });
+      var p2 = el('input', { type: 'password', autocomplete: 'new-password', placeholder: '再输一次' });
+      var saveBtn = el('button', { class: 'btn' }, '保存新密码');
+      var mask = el('div', { class: 'modal-mask' });
+      function close() { mask.remove(); }
+      mask.onclick = function (e) { if (e.target === mask) close(); };
+      saveBtn.onclick = function () {
+        clear(errBox);
+        if (p1.value !== p2.value) { errBox.appendChild(el('div', { class: 'err' }, '两次输入的密码不一致')); return; }
+        saveBtn.disabled = true; saveBtn.textContent = '保存中…';
+        api('/users/' + user.id + '/password', { method: 'PUT', body: { password: p1.value } })
+          .then(function () { close(); toast('密码已更新'); })
+          .catch(function (e) {
+            errBox.appendChild(el('div', { class: 'err' }, e.message));
+            saveBtn.disabled = false; saveBtn.textContent = '保存新密码';
+          });
+      };
+      var card = el('div', { class: 'card stack modal-card' },
+        el('div', { class: 'modal-head' }, el('h3', {}, '设置密码'), el('button', { class: 'x', onclick: close }, '×')),
+        el('p', { class: 'muted', style: { margin: '0' } }, '为 ' + user.displayName + '（' + user.username + '）设置新密码'),
+        errBox,
+        el('label', { class: 'field' }, '新密码', p1),
+        el('label', { class: 'field' }, '确认新密码', p2),
+        saveBtn);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+      p1.focus();
+    }
+
+    // ---------- 管理员修改玩家今日总时间（直接设定总额）----------
+    function openSetTime(player, onDone) {
+      var errBox = el('div');
+      var cur = Math.max(0, Math.round((Number(player.dailyQuotaMin) || 0) + (Number(player.bonusMinutes) || 0)));
+      var input = el('input', { type: 'number', min: '0', max: '1440', value: cur });
+      var quick = el('div', { class: 'mins' });
+      [0, 30, 60, 90].forEach(function (m) {
+        var b = el('button', { type: 'button' }, '+' + String(m));
+        b.onclick = function () {
+          var current = Math.max(0, Math.round(Number(input.value) || 0));
+          input.value = String(Math.min(1440, current + m));
+        };
+        quick.appendChild(b);
+      });
+      var saveBtn = el('button', { class: 'btn' }, '确认修改');
+      var mask = el('div', { class: 'modal-mask' });
+      function close() { mask.remove(); }
+      mask.onclick = function (e) { if (e.target === mask) close(); };
+      saveBtn.onclick = function () {
+        clear(errBox);
+        var m = Math.round(Number(input.value));
+        if (!Number.isFinite(m) || m < 0 || m > 1440) {
+          errBox.appendChild(el('div', { class: 'err' }, '请输入 0~1440 之间的分钟数')); return;
+        }
+        saveBtn.disabled = true; saveBtn.textContent = '处理中…';
+        api('/users/' + player.child + '/quota', { method: 'POST', body: { totalMinutes: m } })
+          .then(function (d) {
+            close();
+            toast('已将 ' + player.label + ' 今日总时间设为 ' + d.totalMinutes + ' 分钟 · 剩余 ' + d.remainingMinutes);
+            onDone && onDone();
+          })
+          .catch(function (e) {
+            errBox.appendChild(el('div', { class: 'err' }, e.message));
+            saveBtn.disabled = false; saveBtn.textContent = '确认修改';
+          });
+      };
+      var card = el('div', { class: 'card stack modal-card' },
+        el('div', { class: 'modal-head' }, el('h3', {}, '修改时间'), el('button', { class: 'x', onclick: close }, '×')),
+        el('p', { class: 'muted', style: { margin: '0' } }, '直接设定 ' + player.label + ' 今日总时间（已用时间不变，仅当天有效，次日重置）'),
+        errBox,
+        el('div', { class: 'field', style: { margin: '2px 0 8px' } }, '快捷增加（分钟）'),
+        quick,
+        el('label', { class: 'field' }, '今日总时间（分钟）', input),
+        saveBtn);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+      input.focus();
+    }
+
+    // ---------- 倒计时环 ----------
+    function makeRing(size, stroke) {
+      var r = (size - stroke) / 2;
+      var c = 2 * Math.PI * r;
+      var track = svg('circle', { class: 'track', cx: size/2, cy: size/2, r: r });
+      var prog = svg('circle', { class: 'prog', cx: size/2, cy: size/2, r: r,
+        'stroke-dasharray': c, 'stroke-dashoffset': c });
+      var s = svg('svg', { width: size, height: size });
+      s.appendChild(track); s.appendChild(prog);
+      var inner = el('div', { class: 'inner' });
+      var wrap = el('div', { class: 'ring', style: { width: size + 'px', height: size + 'px' } });
+      wrap.appendChild(s); wrap.appendChild(inner);
+      return {
+        node: wrap, inner: inner,
+        set: function (fraction, color) {
+          var f = Math.max(0, Math.min(1, fraction));
+          prog.setAttribute('stroke-dashoffset', c * (1 - f));
+          prog.setAttribute('stroke', color);
+        },
+        pulse: function () {
+          wrap.classList.remove('pulse'); void wrap.offsetWidth; wrap.classList.add('pulse');
+        }
+      };
+    }
+
+    function miniRing(size, stroke, fraction, color, label) {
+      var r = (size - stroke) / 2, c = 2 * Math.PI * r;
+      var f = Math.max(0, Math.min(1, fraction));
+      var s = svg('svg', { width: size, height: size, style: '' });
+      s.style.transform = 'rotate(-90deg)';
+      s.appendChild(svg('circle', { fill: 'none', stroke: 'var(--line)', 'stroke-width': stroke, cx: size/2, cy: size/2, r: r }));
+      var prog = svg('circle', { fill: 'none', stroke: color, 'stroke-width': stroke, 'stroke-linecap': 'round',
+        cx: size/2, cy: size/2, r: r, 'stroke-dasharray': c, 'stroke-dashoffset': c * (1 - f) });
+      prog.style.transition = 'stroke-dashoffset .6s';
+      s.appendChild(prog);
+      var wrap = el('div', { class: 'mini' }, el('div', { class: 'lbl' }, String(label)));
+      wrap.insertBefore(s, wrap.firstChild);
+      return wrap;
+    }
+
+    // ---------- 状态 & 路由 ----------
+    var root = document.getElementById('root');
+    var appState = { me: null, needsBootstrap: false };
+    var activeCleanup = null;
+    var shellHashHandler = null;
+
+    function mount() {
+      if (activeCleanup) { activeCleanup(); activeCleanup = null; }
+      if (shellHashHandler) { window.removeEventListener('hashchange', shellHashHandler); shellHashHandler = null; }
+      clear(root);
+      if (!appState.me) renderAuth();
+      else renderShell();
+    }
+
+    // ---------- 登录 / 初始化 ----------
+    function renderAuth() {
+      var boot = appState.needsBootstrap;
+      var errBox = el('div');
+      var uInput = el('input', { autocomplete: 'username', placeholder: '3~32 位，字母数字' });
+      var pInput = el('input', { type: 'password', autocomplete: boot ? 'new-password' : 'current-password', placeholder: '至少 6 位' });
+      var btn = el('button', { class: 'btn' }, boot ? '创建并登录' : '登 录');
+
+      function submit(e) {
+        e.preventDefault();
+        clear(errBox);
+        btn.disabled = true; btn.textContent = '请稍候…';
+        api(boot ? '/auth/bootstrap' : '/auth/login', { method: 'POST', body: { username: uInput.value, password: pInput.value } })
+          .then(function (data) { appState.me = data.user; appState.needsBootstrap = false; mount(); })
+          .catch(function (err) {
+            errBox.appendChild(el('div', { class: 'err' }, err.message));
+            btn.disabled = false; btn.textContent = boot ? '创建并登录' : '登 录';
+          });
+      }
+
+      var form = el('form', { class: 'card stack', onsubmit: submit },
+        errBox,
+        el('label', { class: 'field' }, '用户名', uInput),
+        el('label', { class: 'field' }, '密码', pInput),
+        btn
+      );
+
+      root.appendChild(el('div', { class: 'center-screen' },
+        el('div', { class: 'brand', style: { justifyContent: 'center', marginBottom: '6px' } },
+          el('span', { class: 'dot' }), el('h1', {}, '游戏管家')),
+        boot ? el('p', { class: 'muted', style: { textAlign: 'center', margin: '0 0 20px' } }, '首次使用，创建管理员账号') : null,
+        form
+      ));
+    }
+
+    // ---------- 主壳 ----------
+    function renderShell() {
+      var me = appState.me;
+      var isAdmin = me.role === 'admin';
+      // 管理员只做管理（状态总览/配置/账号）；玩家只有合并的游戏页。每项对应一个可直达的路由。
+      var routes = isAdmin
+        ? [{ k: 'status', label: '状态', render: function (c) { return renderDashboard(c); } },
+           { k: 'config', label: '配置', render: function (c) { return renderConfig(c); } },
+           { k: 'users', label: '账号', render: function (c) { return renderUsers(c, me); } }]
+        : [{ k: 'play', label: '游戏', render: function (c) { return renderPlayerHome(c, me); } }];
+      var keys = routes.map(function (r) { return r.k; });
+
+      // ---- 顶部栏（账户操作，两端通用）----
+      var logoutBtn = el('button', { class: 'btn ghost sm', onclick: function () {
+        api('/auth/logout', { method: 'POST', body: {} }).catch(function () {}).then(function () {
+          appState.me = null; location.hash = ''; mount();
+        });
+      } }, '退出');
+      var profBtn = el('button', { class: 'btn ghost sm', onclick: function () {
+        openEditProfile(me, '/auth/profile', function (updated) { if (updated) { appState.me = updated; mount(); } });
+      } }, avEmoji(me.avatar) + ' 资料');
+      var pwdBtn = el('button', { class: 'btn ghost sm', onclick: openChangePassword }, '改密');
+      root.appendChild(el('div', { class: 'brand' },
+        el('span', { class: 'dot' }), el('h1', {}, '游戏管家'),
+        el('span', { class: 'who' }, me.displayName, profBtn, pwdBtn, logoutBtn)));
+
+      // ---- 侧边/顶部导航（用 hash 链接，支持刷新与前进后退）----
+      var sidenav = el('nav', { class: 'sidenav' });
+      routes.forEach(function (r) {
+        sidenav.appendChild(el('a', { href: '#/' + r.k, 'data-k': r.k }, r.label));
+      });
+      var content = el('div', { class: 'content' });
+      root.appendChild(el('div', { class: 'layout' }, sidenav, content));
+
+      function routeKey() { return (location.hash || '').replace(/^#\/?/, ''); }
+      function renderRoute() {
+        var key = routeKey();
+        if (keys.indexOf(key) < 0) { location.hash = '#/' + keys[0]; return; } // 非法/缺省→跳默认
+        Array.prototype.forEach.call(sidenav.children, function (a) {
+          a.className = a.getAttribute('data-k') === key ? 'active' : '';
+        });
+        if (activeCleanup) { activeCleanup(); activeCleanup = null; }
+        clear(content);
+        var r = routes.filter(function (x) { return x.k === key; })[0];
+        activeCleanup = r.render(content) || null;
+      }
+
+      // 绑定 hash 变化；保存解绑函数，切换用户时清理
+      if (shellHashHandler) window.removeEventListener('hashchange', shellHashHandler);
+      shellHashHandler = renderRoute;
+      window.addEventListener('hashchange', shellHashHandler);
+
+      if (keys.indexOf(routeKey()) < 0) location.hash = '#/' + keys[0];
+      else renderRoute();
+    }
+
+    // ---------- 管理员状态页：玩家时间进度条列表 ----------
+    function renderDashboard(container) {
+      var wrap = el('div');
+      container.appendChild(wrap);
+      var pollTimer = null, tickTimer = null;
+      var status = null, prevActiveId = undefined;
+
+      function fmt(sec) {
+        var m = Math.floor(sec / 60), s = sec % 60;
+        return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+      }
+
+      function render() {
+        clear(wrap);
+        if (!status) { wrap.appendChild(el('div', { class: 'card' }, el('p', { class: 'muted' }, '加载中…'))); return; }
+
+        // 顶部：当前是否有人在玩
+        var a = status.active;
+        if (a) {
+          var color = avColor(a.avatar);
+          var stopBtn = el('button', { class: 'btn stop sm' }, '停止');
+          stopBtn.onclick = function () {
+            stopBtn.disabled = true; stopBtn.textContent = '处理中…';
+            api('/game/stop', { method: 'POST', body: {} })
+              .then(function (r) { toast(r.message || '已停止'); return load(); })
+              .catch(function (e) { toast(e.message); stopBtn.disabled = false; stopBtn.textContent = '停止'; });
+          };
+          var actLabel = a.activity === 'tv' ? '看电视中' : '游戏中';
+          var banner = el('div', { class: 'card active-banner' },
+            el('div', { class: 'plist-av', style: { background: color } }, avEmoji(a.avatar)),
+            el('div', { class: 'grow' },
+              el('div', { class: 'uname' }, a.label, el('span', { class: 'playing-dot' }, '● ' + actLabel)),
+              el('div', { class: 'bar js-sessbar', style: { marginTop: '8px' } }, el('i', { style: { background: color } })),
+              el('div', { class: 'csub js-remain', style: { marginTop: '6px' } }, '')),
+            stopBtn);
+          wrap.appendChild(banner);
+        }
+
+        // 玩家列表（只列成员账号，管理员自身不计为玩家）
+        var players = status.quotas.filter(function (q) { return q.role === 'member'; });
+        var list = el('div', { class: 'card' });
+        if (players.length === 0) {
+          list.appendChild(el('p', { class: 'muted', style: { margin: '4px 0' } }, '还没有玩家账号，去"账号"页添加。'));
+        }
+        players.forEach(function (q) {
+          var bonus = q.bonusMinutes || 0;
+          var effective = q.dailyQuotaMin + bonus;        // 当日总额 = 基础 + 临时加时
+          var pct = effective > 0 ? Math.round(q.remainingMinutes / effective * 100) : 0;
+          var barColor = q.remainingMinutes > 0 ? 'var(--go)' : 'var(--stop)';
+          var playing = a && a.child === q.child;
+          var rowActLabel = playing ? (a.activity === 'tv' ? '● 看电视中' : '● 游戏中') : null;
+          var quotaText = '剩余 ' + q.remainingMinutes + ' / 共 ' + effective + ' 分钟'
+            + (bonus > 0 ? '（含临时 +' + bonus + '）' : '');
+          var bonusBtn = el('button', { class: 'btn ghost sm' }, '改时间');
+          bonusBtn.onclick = function () { openSetTime(q, load); };
+          list.appendChild(el('div', { class: 'plist-row' },
+            el('div', { class: 'plist-av', style: { background: avColor(q.avatar) } }, avEmoji(q.avatar)),
+            el('div', { class: 'grow' },
+              el('div', { class: 'uname' }, q.label, playing ? el('span', { class: 'playing-dot' }, rowActLabel) : null),
+              el('div', { class: 'bar', style: { marginTop: '8px' } }, el('i', { style: { width: pct + '%', background: barColor } })),
+              el('div', { class: 'csub', style: { marginTop: '6px' } }, quotaText)),
+            el('div', { class: 'plist-num', style: { color: barColor } }, String(q.remainingMinutes)),
+            bonusBtn));
+        });
+        wrap.appendChild(list);
+
+        if (a) tick(); // 立即刷新一次倒计时
+      }
+
+      function tick() {
+        if (!status || !status.active) return;
+        var a = status.active;
+        var ends = new Date(a.endsAtIso).getTime();
+        var started = new Date(a.startedAtIso).getTime();
+        var total = Math.max(1, (ends - started) / 1000);
+        var remain = Math.max(0, Math.round((ends - Date.now()) / 1000));
+        var remainMin = Math.ceil(remain / 60);
+        var remEl = wrap.querySelector('.js-remain');
+        if (remEl) remEl.textContent = fmt(remain) + ' · 还剩约 ' + remainMin + ' 分钟';
+        var barI = wrap.querySelector('.js-sessbar > i');
+        if (barI) barI.style.width = (remain / total * 100) + '%';
+        if (remain <= 0) load();
+      }
+
+      function load() {
+        return api('/game/status').then(function (s) {
+          status = s;
+          prevActiveId = s.active ? s.active.child : null;
+          render(); // 列表小，直接整块重渲染；倒计时由 tick 每秒更新
+        }).catch(function (e) {
+          clear(wrap);
+          wrap.appendChild(el('div', { class: 'err' }, e.message));
+        });
+      }
+
+      load();
+      pollTimer = setInterval(load, 5000);
+      tickTimer = setInterval(tick, 1000);
+      return function () { clearInterval(pollTimer); clearInterval(tickTimer); };
+    }
+
+    // ---------- 开始游戏（玩家即当前登录账号，无需选人）----------
+    function renderStart(container, me, onStarted) {
+      var minutes = 30;
+      var errBox = el('div');
+      var minsRow = el('div', { class: 'mins' });
+      var minsLabel = el('b', { style: { color: 'var(--ink)' } }, minutes + ' 分钟');
+      var range = el('input', { type: 'range', min: '10', max: '60', step: '10', value: minutes, style: { marginTop: '14px', padding: '0' } });
+      var color = avColor(me.avatar);
+
+      [10, 20, 30, 60].forEach(function (m) {
+        var b = el('button', { class: m === minutes ? 'sel' : '' }, String(m));
+        b.onclick = function () { setMinutes(m); };
+        minsRow.appendChild(b);
+      });
+      function setMinutes(m) {
+        minutes = m; minsLabel.textContent = m + ' 分钟'; range.value = m;
+        Array.prototype.forEach.call(minsRow.children, function (b) {
+          b.className = Number(b.textContent) === m ? 'sel' : '';
+        });
+      }
+      range.oninput = function () { setMinutes(Number(range.value)); };
+
+      var btn = el('button', { class: 'btn go' }, '开始游戏 · 通电');
+      btn.onclick = function () {
+        clear(errBox);
+        btn.disabled = true; btn.textContent = '开机中…';
+        api('/game/start', { method: 'POST', body: { minutes: minutes } })
+          .then(function (r) { toast(r.message || '已开始'); onStarted && onStarted(); })
+          .catch(function (e) {
+            errBox.appendChild(el('div', { class: 'err' }, e.message));
+            btn.disabled = false; btn.textContent = '开始游戏 · 通电';
+          });
+      };
+
+      // 顶部展示"这次是谁在玩"——就是登录的自己
+      var whoCard = el('div', { class: 'player-hero', style: { borderColor: color } },
+        el('div', { class: 'player-hero-av', style: { background: color } }, avEmoji(me.avatar)),
+        el('div', {},
+          el('div', { class: 'player-hero-name' }, me.displayName),
+          el('div', { class: 'muted' }, '现在给你自己开始游戏')));
+
+      container.appendChild(el('div', { class: 'card stack' },
+        errBox,
+        whoCard,
+        el('div', {},
+          el('div', { class: 'field', style: { marginBottom: '8px' } }, '玩多久？', minsLabel),
+          minsRow, range),
+        btn,
+        el('p', { class: 'muted', style: { textAlign: 'center', margin: '0' } }, '仅周末可玩，结束前会自动提醒并关机')
+      ));
+    }
+
+    // ---------- 玩家首页（个人状态 + 开始游戏，合并页）----------
+    function renderPlayerHome(container, me) {
+      var wrap = el('div');
+      container.appendChild(wrap);
+      var pollTimer = null, tickTimer = null;
+      var status = null, prevRemainMin = null, prevKind = null;
+      var minutes = 30;        // 空闲时的开始时长（跨轮询保持）
+      var activity = 'game';   // 'game' 玩游戏 / 'tv' 看电视（共享配额）
+
+      function fmt(sec) {
+        var m = Math.floor(sec / 60), s = sec % 60;
+        return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+      }
+      function myQuota() {
+        return status && status.quotas ? status.quotas.filter(function (q) { return q.child === me.id; })[0] : null;
+      }
+      function viewKind() {
+        if (!status) return 'loading';
+        if (status.active) return status.active.child === me.id ? 'mine' : 'other';
+        return 'idle';
+      }
+
+      function buildStartArea() {
+        var errBox = el('div');
+
+        // 活动选择：玩游戏 / 看电视
+        var actRow = el('div', { class: 'mins', style: { gridTemplateColumns: '1fr 1fr' } });
+        var ACTS = [{ k: 'game', t: '🎮 玩游戏' }, { k: 'tv', t: '📺 看电视' }];
+        ACTS.forEach(function (o) {
+          var b = el('button', { class: o.k === activity ? 'sel' : '' }, o.t);
+          b.onclick = function () { setActivity(o.k); };
+          actRow.appendChild(b);
+        });
+        function setActivity(k) {
+          activity = k;
+          Array.prototype.forEach.call(actRow.children, function (b, i) {
+            b.className = ACTS[i].k === k ? 'sel' : '';
+          });
+          btn.textContent = startLabel();
+        }
+        function startLabel() { return (activity === 'tv' ? '开始看电视' : '开始游戏') + ' · 通电'; }
+
+        var minsRow = el('div', { class: 'mins' });
+        var minsLabel = el('b', { style: { color: 'var(--ink)' } }, minutes + ' 分钟');
+        var range = el('input', { type: 'range', min: '10', max: '60', step: '10', value: minutes, style: { marginTop: '14px', padding: '0' } });
+        [10, 20, 30, 60].forEach(function (m) {
+          var b = el('button', { class: m === minutes ? 'sel' : '' }, String(m));
+          b.onclick = function () { setMinutes(m); };
+          minsRow.appendChild(b);
+        });
+        function setMinutes(m) {
+          minutes = m; minsLabel.textContent = m + ' 分钟'; range.value = m;
+          Array.prototype.forEach.call(minsRow.children, function (b) {
+            b.className = Number(b.textContent) === m ? 'sel' : '';
+          });
+        }
+        range.oninput = function () { setMinutes(Number(range.value)); };
+        var btn = el('button', { class: 'btn go', style: { marginTop: '16px' } }, startLabel());
+        btn.onclick = function () {
+          clear(errBox);
+          btn.disabled = true; btn.textContent = '开机中…';
+          api('/game/start', { method: 'POST', body: { minutes: minutes, activity: activity } })
+            .then(function (r) { toast(r.message || '已开始'); return load(); })
+            .catch(function (e) {
+              errBox.appendChild(el('div', { class: 'err' }, e.message));
+              btn.disabled = false; btn.textContent = startLabel();
+            });
+        };
+        return el('div', {},
+          errBox,
+          el('div', { class: 'field', style: { margin: '2px 0 8px' } }, '做什么？'),
+          actRow,
+          el('div', { class: 'field', style: { margin: '14px 0 8px' } }, '用多久？', minsLabel),
+          minsRow, range, btn);
+      }
+
+      function render() {
+        clear(wrap);
+        prevKind = viewKind();
+        if (!status) { wrap.appendChild(el('div', { class: 'card' }, el('p', { class: 'muted' }, '加载中…'))); return; }
+        var active = status.active;
+        var card = el('div', { class: 'card' });
+        var rw = el('div', { class: 'ring-wrap' });
+        card.appendChild(rw);
+
+        if (active) {
+          var ring = makeRing(240, 14);
+          rw._ring = ring;
+          rw.appendChild(ring.node);
+          if (active.child === me.id) {
+            var stopBtn = el('button', { class: 'btn stop', style: { marginTop: '14px' } }, '停止游戏 · 关机');
+            stopBtn.onclick = function () {
+              stopBtn.disabled = true; stopBtn.textContent = '处理中…';
+              api('/game/stop', { method: 'POST', body: {} })
+                .then(function (r) { toast(r.message || '已停止'); return load(); })
+                .catch(function (e) { toast(e.message); stopBtn.disabled = false; stopBtn.textContent = '停止游戏 · 关机'; });
+            };
+            rw.appendChild(stopBtn);
+          } else {
+            rw.appendChild(el('p', { class: 'muted', style: { textAlign: 'center', margin: '10px 0 0' } },
+              '正在有人玩，等 TA 玩完再轮到你哦'));
+          }
+          tick();
+        } else {
+          // 空闲：圆环体现今日剩余比例，环内直接展示头像/昵称/剩余分钟
+          var color = avColor(me.avatar);
+          var q = myQuota();
+          var effective = q ? q.dailyQuotaMin + (q.bonusMinutes || 0) : 0;
+          var frac = (q && effective > 0) ? q.remainingMinutes / effective : 0;
+          // 圆环颜色：有剩余时间→绿色；已用完→红色；今天不可玩→灰色
+          var ringColor = !status.allowedToday
+            ? 'var(--line)'
+            : (q && q.remainingMinutes > 0 ? 'var(--go)' : 'var(--stop)');
+          var idle = makeRing(240, 14);
+          idle.set(frac, ringColor);
+          idle.inner.appendChild(el('div', { class: 'player-hero-av', style: { background: color, width: '44px', height: '44px', fontSize: '26px', borderRadius: '14px', margin: '0 auto 4px' } }, avEmoji(me.avatar)));
+          idle.inner.appendChild(el('div', { class: 'name', style: { color: color } }, me.displayName));
+          if (!status.allowedToday) {
+            idle.inner.appendChild(el('div', { class: 'cap' }, '今天不能玩游戏'));
+          } else if (q) {
+            idle.inner.appendChild(el('div', { class: 'big', style: { fontSize: '34px', marginTop: '2px' } }, String(q.remainingMinutes)));
+            idle.inner.appendChild(el('div', { class: 'cap' }, '分钟 · 今日共 ' + effective + ((q.bonusMinutes || 0) > 0 ? '（含临时 +' + q.bonusMinutes + '）' : '')));
+          } else {
+            idle.inner.appendChild(el('div', { class: 'cap' }, '准备好就开始吧'));
+          }
+          rw.appendChild(idle.node);
+          card.appendChild(buildStartArea());
+        }
+        wrap.appendChild(card);
+      }
+
+      function tick() {
+        if (!status || !status.active) return;
+        var rw = wrap.querySelector('.ring-wrap');
+        if (!rw || !rw._ring) return;
+        var a = status.active;
+        var ends = new Date(a.endsAtIso).getTime();
+        var started = new Date(a.startedAtIso).getTime();
+        var total = Math.max(1, (ends - started) / 1000);
+        var remain = Math.max(0, Math.round((ends - Date.now()) / 1000));
+        var remainMin = Math.ceil(remain / 60);
+        var color = avColor(a.avatar);
+        var mine = a.child === me.id;
+        var actWord = a.activity === 'tv' ? '正在看电视' : '正在玩游戏';
+        rw._ring.set(remain / total, color);
+        clear(rw._ring.inner);
+        rw._ring.inner.appendChild(el('div', { class: 'name', style: { color: color } },
+          avEmoji(a.avatar) + ' ' + (mine ? '你' : a.label) + ' ' + actWord));
+        rw._ring.inner.appendChild(el('div', { class: 'big' }, fmt(remain)));
+        rw._ring.inner.appendChild(el('div', { class: 'cap' }, '还剩约 ' + remainMin + ' 分钟'));
+        if (prevRemainMin !== null && remainMin !== prevRemainMin) rw._ring.pulse();
+        prevRemainMin = remainMin;
+        if (remain <= 0) load();
+      }
+
+      function load() {
+        return api('/game/status').then(function (s) {
+          status = s;
+          if (!s.active) prevRemainMin = null;
+          if (viewKind() !== prevKind || !wrap.querySelector('.card')) render();
+          else tick();
+        }).catch(function (e) {
+          clear(wrap);
+          wrap.appendChild(el('div', { class: 'err' }, e.message));
+        });
+      }
+
+      load();
+      pollTimer = setInterval(load, 5000);
+      tickTimer = setInterval(tick, 1000);
+      return function () { clearInterval(pollTimer); clearInterval(tickTimer); };
+    }
+
+    // ---------- 配置（管理员）----------
+    function renderConfig(container) {
+      var box = el('div');
+      container.appendChild(box);
+      box.appendChild(el('div', { class: 'card' }, el('p', { class: 'muted' }, '加载中…')));
+
+      api('/config').then(function (d) {
+        var cfg = d.config, labels = d.weekdayLabels;
+        clear(box);
+        var errBox = el('div');
+        var daily = el('input', { type: 'number', min: '5', max: '1440', value: cfg.dailyQuotaMin });
+        var minS = el('input', { type: 'number', min: '1', value: cfg.minSingleSessionMin });
+        var maxS = el('input', { type: 'number', min: '1', value: cfg.maxSingleSessionMin });
+        var reminders = el('input', { value: cfg.reminderSeconds.join(', ') });
+
+        var selectedDays = cfg.allowedWeekdays.slice();
+        var chipRow = el('div', { class: 'chip-row' });
+        labels.forEach(function (lbl, d) {
+          var chip = el('button', { class: 'chip' + (selectedDays.indexOf(d) >= 0 ? ' on' : '') }, lbl);
+          chip.onclick = function () {
+            var i = selectedDays.indexOf(d);
+            if (i >= 0) selectedDays.splice(i, 1); else selectedDays.push(d);
+            chip.className = 'chip' + (selectedDays.indexOf(d) >= 0 ? ' on' : '');
+          };
+          chipRow.appendChild(chip);
+        });
+
+        var btn = el('button', { class: 'btn' }, '保存配置');
+        btn.onclick = function () {
+          clear(errBox);
+          var payload = {
+            dailyQuotaMin: Number(daily.value),
+            allowedWeekdays: selectedDays.slice().sort(function (a, b) { return a - b; }),
+            maxSingleSessionMin: Number(maxS.value),
+            minSingleSessionMin: Number(minS.value),
+            reminderSeconds: reminders.value.split(',').map(function (s) { return Number(s.trim()); }).filter(function (n) { return n > 0; })
+          };
+          btn.disabled = true; btn.textContent = '保存中…';
+          api('/config', { method: 'PUT', body: { config: payload } })
+            .then(function () { toast('配置已保存并生效'); btn.disabled = false; btn.textContent = '保存配置'; })
+            .catch(function (e) {
+              errBox.appendChild(el('div', { class: 'err' }, e.message));
+              btn.disabled = false; btn.textContent = '保存配置';
+            });
+        };
+
+        box.appendChild(el('div', { class: 'card stack' },
+          errBox,
+          el('label', { class: 'field' }, '每日配额（分钟 / 每人）', daily),
+          el('div', {}, el('div', { class: 'field', style: { marginBottom: '8px' } }, '允许玩的星期'), chipRow),
+          el('div', { class: 'kid-row' },
+            el('label', { class: 'field' }, '单次下限（分钟）', minS),
+            el('label', { class: 'field' }, '单次上限（分钟）', maxS)),
+          el('label', { class: 'field' }, '到期前提醒（秒，逗号分隔）', reminders),
+          btn
+        ));
+      }).catch(function (e) {
+        clear(box); box.appendChild(el('div', { class: 'err' }, e.message));
+      });
+    }
+
+    // ---------- 用户管理（管理员）----------
+    function renderUsers(container, me) {
+      var box = el('div');
+      container.appendChild(box);
+
+      function load() {
+        api('/users').then(function (d) { renderList(d.users); }).catch(function (e) {
+          clear(box); box.appendChild(el('div', { class: 'err' }, e.message));
+        });
+      }
+
+      function renderList(users) {
+        clear(box);
+        var list = el('div', { class: 'card' });
+        users.forEach(function (u) {
+          var right = [el('span', { class: 'tag ' + u.role }, u.role === 'admin' ? '管理员' : '成员')];
+          var editBtn = el('button', { class: 'btn ghost sm' }, '资料');
+          editBtn.onclick = function () { openEditProfile(u, '/users/' + u.id + '/profile', function () { load(); }); };
+          var pwdBtn = el('button', { class: 'btn ghost sm' }, '改密');
+          pwdBtn.onclick = function () { openAdminSetPassword(u); };
+          var roleBtn = el('button', { class: 'btn ghost sm' }, u.role === 'admin' ? '降为成员' : '设为管理员');
+          roleBtn.onclick = function () {
+            api('/users/' + u.id + '/role', { method: 'PUT', body: { role: u.role === 'admin' ? 'member' : 'admin' } })
+              .then(load).catch(function (e) { toast(e.message); });
+          };
+          right.push(editBtn, pwdBtn, roleBtn);
+          if (u.id !== me.id) {
+            var delBtn = el('button', { class: 'btn ghost sm' }, '删除');
+            delBtn.onclick = function () {
+              if (!confirm('删除账号 ' + u.displayName + '？')) return;
+              api('/users/' + u.id, { method: 'DELETE' }).then(load).catch(function (e) { toast(e.message); });
+            };
+            right.push(delBtn);
+          }
+          list.appendChild(el('div', { class: 'row' },
+            el('div', { class: 'player-hero-av', style: { background: avColor(u.avatar), width: '40px', height: '40px', fontSize: '22px', borderRadius: '12px' } }, avEmoji(u.avatar)),
+            el('div', { class: 'grow' },
+              el('div', { class: 'uname' }, u.displayName + (u.id === me.id ? ' · 我' : '')),
+              el('div', { class: 'muted' }, '登录名 ' + u.username + ' · ' + (u.lastLoginAt ? '上次登录 ' + new Date(u.lastLoginAt).toLocaleString('zh-CN') : '从未登录'))),
+            right));
+        });
+        box.appendChild(list);
+
+        // 添加账号（支持玩家昵称 + 头像 logo）
+        var errBox = el('div');
+        var uInput = el('input', { placeholder: '3~32 位，字母数字' });
+        var nameInput = el('input', { placeholder: '玩家昵称，1~24 字' });
+        var pInput = el('input', { type: 'password', placeholder: '至少 6 位' });
+        var roleSel = el('select', {});
+        roleSel.appendChild(el('option', { value: 'member' }, '成员（可开关游戏）'));
+        roleSel.appendChild(el('option', { value: 'admin' }, '管理员（可改配置/管账号）'));
+        var picker = makeAvatarPicker('star');
+        var addBtn = el('button', { class: 'btn' }, '添加账号');
+        addBtn.onclick = function () {
+          clear(errBox);
+          addBtn.disabled = true; addBtn.textContent = '添加中…';
+          api('/users', { method: 'POST', body: {
+            username: uInput.value, password: pInput.value, role: roleSel.value,
+            displayName: nameInput.value, avatar: picker.get()
+          } })
+            .then(function () { toast('已添加账号'); load(); })
+            .catch(function (e) {
+              errBox.appendChild(el('div', { class: 'err' }, e.message));
+              addBtn.disabled = false; addBtn.textContent = '添加账号';
+            });
+        };
+        box.appendChild(el('div', { class: 'section-title' }, '添加账号'));
+        box.appendChild(el('div', { class: 'card stack' },
+          errBox,
+          el('label', { class: 'field' }, '登录用户名', uInput),
+          el('label', { class: 'field' }, '玩家昵称', nameInput),
+          el('label', { class: 'field' }, '初始密码', pInput),
+          el('label', { class: 'field' }, '角色', roleSel),
+          el('div', {}, el('div', { class: 'field', style: { marginBottom: '8px' } }, '头像 logo', picker.node)),
+          addBtn
+        ));
+      }
+
+      load();
+    }
+
+    // ---------- 启动 ----------
+    api('/auth/me').then(function (d) {
+      appState.me = d.user; appState.needsBootstrap = d.needsBootstrap; mount();
+    }).catch(function () {
+      root.appendChild(el('div', { class: 'center-screen' },
+        el('p', { class: 'muted', style: { textAlign: 'center' } }, '无法连接服务，请刷新重试')));
+    });
+  })();
+  </script>
+</body>
+</html>
