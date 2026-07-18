@@ -189,6 +189,9 @@ export class WebServer {
       sendJson(res, 200, this.gameStatus(me));
       return;
     }
+    if (path === '/api/game/history' && method === 'GET') {
+      return this.handleGameHistory(req, res, me);
+    }
     if (path === '/api/game/start' && method === 'POST') {
       return this.handleGameStart(req, res, me);
     }
@@ -307,6 +310,18 @@ export class WebServer {
       ? { ...status.active, avatar: metaById.get(status.active.child)?.avatar || 'star' }
       : null;
     return { ...status, quotas, active, meId: me.id };
+  }
+
+  /** 管理员查看全部记录；普通成员只能查看自己的记录。 */
+  private handleGameHistory(req: IncomingMessage, res: ServerResponse, me: PublicUser): void {
+    const url = new URL(req.url || '/', 'http://localhost');
+    const requestedLimit = Number(url.searchParams.get('limit') || 50);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(100, Math.floor(requestedLimit)))
+      : 50;
+    const playerId = me.role === 'admin' ? undefined : me.id;
+    const records = getGameConsoleController().getQuotaService().listHistory(playerId, limit);
+    sendJson(res, 200, { records });
   }
 
   /** 开始游戏/看电视：玩家就是当前登录账号，activity 决定通电哪些接口。 */

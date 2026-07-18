@@ -596,8 +596,13 @@ export class GameConsoleController {
       logger.warn('game-console.stop_power_off_failed', { error: off.error });
     }
 
-    const remaining = this.quota.consume(active.child, actualMinutes);
-    this.quota.setActiveSession(null);
+    const remaining = this.quota.finishSession(
+      active,
+      actualMinutes,
+      'manual',
+      off.ok,
+      new Date(now),
+    );
 
     return {
       ok: true,
@@ -705,8 +710,13 @@ export class GameConsoleController {
 
     const label = session.label ?? session.child;
     const ok = await this.powerOffOnExpire(this.sessionDids(session));
-    const remaining = this.quota.consume(session.child, session.plannedMinutes);
-    this.quota.setActiveSession(null);
+    const remaining = this.quota.finishSession(
+      session,
+      session.plannedMinutes,
+      'expired',
+      ok,
+      new Date(session.endsAt),
+    );
 
     logger.info('game-console.expired', {
       child: session.child,
@@ -758,8 +768,13 @@ export class GameConsoleController {
       if (!off.ok) {
         logger.warn('game-console.recover.power_off_failed', { error: off.error });
       }
-      this.quota.consume(active.child, active.plannedMinutes);
-      this.quota.setActiveSession(null);
+      this.quota.finishSession(
+        active,
+        active.plannedMinutes,
+        'offline_expired',
+        off.ok,
+        new Date(active.endsAt),
+      );
     }
   }
 

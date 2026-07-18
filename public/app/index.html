@@ -128,6 +128,27 @@
     .plist-num { font-weight: 800; font-size: 19px; flex: 0 0 auto; min-width: 34px; text-align: right; }
     .playing-dot { font-size: 11px; font-weight: 800; color: var(--go); margin-left: 6px; }
     .active-banner { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .history-card { margin-top: 16px; }
+    .history-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .history-head h2 { margin: 0; font-size: 17px; }
+    .history-summary { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+    .history-tabs { display: flex; gap: 7px; margin-bottom: 6px; }
+    .history-tabs button { padding: 7px 12px; border-radius: 999px; background: #F1ECE1; color: var(--muted);
+      font-size: 12.5px; font-weight: 800; }
+    .history-tabs button.on { background: var(--ink); color: #fff; }
+    .history-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center;
+      gap: 11px; padding: 13px 2px; border-bottom: 1px solid var(--line); }
+    .history-row:last-child { border-bottom: none; }
+    .history-icon { width: 42px; height: 42px; border-radius: 13px; display: flex; align-items: center;
+      justify-content: center; font-size: 21px; background: #F7F3EA; }
+    .history-title { font-size: 14px; font-weight: 800; }
+    .history-time { margin-top: 4px; color: var(--muted); font-size: 12.5px; }
+    .history-minutes { font-size: 15px; font-weight: 800; white-space: nowrap; }
+    .history-reason { margin-top: 3px; color: var(--muted); font-size: 11px; text-align: right; }
+    @media (max-width: 480px) {
+      .history-head { display: block; }
+      .history-summary { margin: 6px 0 0; text-align: left; }
+    }
     .quota-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
     .qcard { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 14px;
       display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -469,6 +490,71 @@
       return wrap;
     }
 
+    // ---------- 游戏 / 电视历史记录卡片（管理员与玩家复用）----------
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function sameLocalDay(a, b) {
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    }
+    function shortDate(d) { return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+    function shortTime(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+    function historyTimeText(record) {
+      var start = new Date(record.startedAt), end = new Date(record.endedAt), now = new Date();
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())) return '时间记录异常';
+      var day = sameLocalDay(start, now) ? '今天' : shortDate(start);
+      var endText = sameLocalDay(start, end) ? shortTime(end) : shortDate(end) + ' ' + shortTime(end);
+      return day + ' ' + shortTime(start) + '～' + endText;
+    }
+    function makeHistoryCard(records, isAdmin, filter, onFilter) {
+      records = Array.isArray(records) ? records : [];
+      filter = filter === 'game' || filter === 'tv' ? filter : 'all';
+      var card = el('section', { class: 'card history-card' });
+      var head = el('div', { class: 'history-head' }, el('h2', {}, isAdmin ? '历史使用记录' : '我的历史记录'));
+
+      if (!isAdmin) {
+        var weekStart = new Date();
+        var mondayOffset = (weekStart.getDay() + 6) % 7;
+        weekStart.setHours(0, 0, 0, 0);
+        weekStart.setDate(weekStart.getDate() - mondayOffset);
+        var gameTotal = 0, tvTotal = 0;
+        records.forEach(function (record) {
+          if (new Date(record.endedAt).getTime() < weekStart.getTime()) return;
+          if (record.activity === 'tv') tvTotal += Number(record.actualMinutes) || 0;
+          else gameTotal += Number(record.actualMinutes) || 0;
+        });
+        head.appendChild(el('div', { class: 'history-summary' },
+          '本周：游戏 ' + gameTotal + ' 分钟', el('br'), '电视 ' + tvTotal + ' 分钟'));
+      }
+      card.appendChild(head);
+
+      var tabs = el('div', { class: 'history-tabs' });
+      [{ k: 'all', t: '全部' }, { k: 'game', t: '游戏' }, { k: 'tv', t: '电视' }].forEach(function (item) {
+        tabs.appendChild(el('button', {
+          type: 'button', class: item.k === filter ? 'on' : '',
+          onclick: function () { if (item.k !== filter) onFilter(item.k); }
+        }, item.t));
+      });
+      card.appendChild(tabs);
+
+      var visible = records.filter(function (record) { return filter === 'all' || record.activity === filter; }).slice(0, 20);
+      if (visible.length === 0) {
+        card.appendChild(el('p', { class: 'muted', style: { margin: '16px 2px 2px' } }, '暂无使用记录'));
+        return card;
+      }
+      visible.forEach(function (record) {
+        var isTv = record.activity === 'tv';
+        var reason = record.endReason === 'manual' ? '主动停止' : '自动结束';
+        card.appendChild(el('div', { class: 'history-row' },
+          el('div', { class: 'history-icon' }, isTv ? '📺' : '🎮'),
+          el('div', {},
+            el('div', { class: 'history-title' }, (isAdmin ? record.label + ' · ' : '') + (isTv ? '电视' : '游戏')),
+            el('div', { class: 'history-time' }, historyTimeText(record))),
+          el('div', {},
+            el('div', { class: 'history-minutes' }, String(record.actualMinutes) + ' 分钟'),
+            el('div', { class: 'history-reason' }, reason))));
+      });
+      return card;
+    }
+
     // ---------- 状态 & 路由 ----------
     var root = document.getElementById('root');
     var appState = { me: null, needsBootstrap: false };
@@ -580,6 +666,7 @@
       container.appendChild(wrap);
       var pollTimer = null, tickTimer = null;
       var status = null, prevActiveId = undefined;
+      var historyRecords = [], historyFilter = 'all';
 
       function fmt(sec) {
         var m = Math.floor(sec / 60), s = sec % 60;
@@ -639,6 +726,10 @@
             bonusBtn));
         });
         wrap.appendChild(list);
+        wrap.appendChild(makeHistoryCard(historyRecords, true, historyFilter, function (nextFilter) {
+          historyFilter = nextFilter;
+          render();
+        }));
 
         if (a) tick(); // 立即刷新一次倒计时
       }
@@ -659,8 +750,10 @@
       }
 
       function load() {
-        return api('/game/status').then(function (s) {
+        return Promise.all([api('/game/status'), api('/game/history?limit=50')]).then(function (result) {
+          var s = result[0], history = result[1];
           status = s;
+          historyRecords = history.records || [];
           prevActiveId = s.active ? s.active.child : null;
           render(); // 列表小，直接整块重渲染；倒计时由 tick 每秒更新
         }).catch(function (e) {
@@ -733,6 +826,7 @@
       container.appendChild(wrap);
       var pollTimer = null, tickTimer = null;
       var status = null, prevRemainMin = null, prevKind = null;
+      var historyRecords = [], historyFilter = 'all';
       var minutes = 30;        // 空闲时的开始时长（跨轮询保持）
       var activity = 'game';   // 'game' 玩游戏 / 'tv' 看电视（共享配额）
 
@@ -856,6 +950,10 @@
           card.appendChild(buildStartArea());
         }
         wrap.appendChild(card);
+        wrap.appendChild(makeHistoryCard(historyRecords, false, historyFilter, function (nextFilter) {
+          historyFilter = nextFilter;
+          render();
+        }));
       }
 
       function tick() {
@@ -883,8 +981,10 @@
       }
 
       function load() {
-        return api('/game/status').then(function (s) {
+        return Promise.all([api('/game/status'), api('/game/history?limit=50')]).then(function (result) {
+          var s = result[0], history = result[1];
           status = s;
+          historyRecords = history.records || [];
           if (!s.active) prevRemainMin = null;
           if (viewKind() !== prevKind || !wrap.querySelector('.card')) render();
           else tick();

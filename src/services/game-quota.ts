@@ -96,11 +96,29 @@ interface PersistedUserQuota {
   bonusMinutes?: number;
 }
 
+export type SessionEndReason = 'manual' | 'expired' | 'offline_expired';
+
+export interface SessionHistoryRecord {
+  id: string;
+  playerId: PlayerId;
+  label: string;
+  activity: ActivityType;
+  startedAt: string;
+  endedAt: string;
+  plannedMinutes: number;
+  actualMinutes: number;
+  endReason: SessionEndReason;
+  powerOffOk: boolean;
+}
+
 interface PersistedState {
-  version: 1;
+  version: 2;
   users: Partial<Record<PlayerId, PersistedUserQuota>>;
   activeSession: ActiveSession | null;
+  history: SessionHistoryRecord[];
 }
+
+const MAX_HISTORY_RECORDS = 500;
 
 export interface GameQuotaConfig {
   /** 周末单人单日配额（分钟），默认 120 */
@@ -148,6 +166,23 @@ export function localDateString(date: Date = new Date()): string {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+function isSessionHistoryRecord(value: unknown): value is SessionHistoryRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<SessionHistoryRecord>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.playerId === 'string' &&
+    typeof record.label === 'string' &&
+    (record.activity === 'game' || record.activity === 'tv') &&
+    typeof record.startedAt === 'string' && Number.isFinite(Date.parse(record.startedAt)) &&
+    typeof record.endedAt === 'string' && Number.isFinite(Date.parse(record.endedAt)) &&
+    Number.isFinite(record.plannedMinutes) && (record.plannedMinutes as number) >= 0 &&
+    Number.isFinite(record.actualMinutes) && (record.actualMinutes as number) >= 0 &&
+    (record.endReason === 'manual' || record.endReason === 'expired' || record.endReason === 'offline_expired') &&
+    typeof record.powerOffOk === 'boolean'
+  );
 }
 
 export class GameQuotaService {
@@ -284,6 +319,56 @@ export class GameQuotaService {
     this.scheduleFlush();
   }
 
+  /** 一次性完成会话扣额、清空活动状态并写入历史记录。 */
+  finishSession(
+    session: ActiveSession,
+    actualMinutes: number,
+    endReason: SessionEndReason,
+    powerOffOk: boolean,
+    endedAt: Date = new Date(),
+  ): number {
+    if (this.state.activeSession?.startedAt !== session.startedAt) {
+      return this.getSnapshot(session.child, endedAt).remainingMinutes;
+    }
+    const minutes = Math.max(0, Math.min(session.plannedMinutes, Math.round(actualMinutes)));
+    const today = localDateString(endedAt);
+    const cur = this.state.users[session.child];
+    const sameDay = !!(cur && cur.date === today);
+    const used = sameDay ? cur!.usedMinutes : 0;
+    const bonus = sameDay ? cur!.bonusMinutes ?? 0 : 0;
+    const effective = Math.max(0, this.cfg.dailyQuotaMin + bonus);
+    const nextUsed = Math.min(effective, Math.max(0, used + minutes));
+    this.state.users[session.child] = { date: today, usedMinutes: nextUsed, bonusMinutes: bonus };
+    this.state.activeSession = null;
+
+    const id = `${session.child}:${session.startedAt}`;
+    if (!this.state.history.some((record) => record.id === id)) {
+      this.state.history.unshift({
+        id,
+        playerId: session.child,
+        label: session.label ?? session.child,
+        activity: session.activity === 'tv' ? 'tv' : 'game',
+        startedAt: session.startedAt,
+        endedAt: endedAt.toISOString(),
+        plannedMinutes: session.plannedMinutes,
+        actualMinutes: minutes,
+        endReason,
+        powerOffOk,
+      });
+      this.state.history = this.state.history.slice(0, MAX_HISTORY_RECORDS);
+    }
+    this.scheduleFlush();
+    return Math.max(0, effective - nextUsed);
+  }
+
+  listHistory(playerId?: PlayerId, limit = 50): SessionHistoryRecord[] {
+    const count = Math.max(1, Math.min(100, Math.floor(limit) || 50));
+    const records = playerId
+      ? this.state.history.filter((record) => record.playerId === playerId)
+      : this.state.history;
+    return records.slice(0, count).map((record) => ({ ...record }));
+  }
+
   // ---------------- 校验 ----------------
 
   /** 把 minutes 收敛到允许区间；非数字或越界给出 reason */
@@ -313,7 +398,7 @@ export class GameQuotaService {
   // ---------------- 持久化 ----------------
 
   private emptyState(): PersistedState {
-    return { version: 1, users: {}, activeSession: null };
+    return { version: 2, users: {}, activeSession: null, history: [] };
   }
 
   private loadFromDisk(): PersistedState {
@@ -322,12 +407,20 @@ export class GameQuotaService {
       const raw = readFileSync(this.cfg.file, 'utf8');
       if (!raw.trim()) return this.emptyState();
       const parsed = JSON.parse(raw) as Partial<PersistedState>;
+      const history = Array.isArray(parsed.history)
+        ? parsed.history.filter(isSessionHistoryRecord).slice(0, MAX_HISTORY_RECORDS)
+        : [];
       const state: PersistedState = {
-        version: 1,
+        version: 2,
         users: parsed.users && typeof parsed.users === 'object' ? (parsed.users as PersistedState['users']) : {},
         activeSession: parsed.activeSession ?? null,
+        history,
       };
-      logger.info('game-quota.loaded', { file: this.cfg.file, hasActive: !!state.activeSession });
+      logger.info('game-quota.loaded', {
+        file: this.cfg.file,
+        hasActive: !!state.activeSession,
+        historyCount: state.history.length,
+      });
       return state;
     } catch (error) {
       logger.warn('game-quota.load_failed', {
